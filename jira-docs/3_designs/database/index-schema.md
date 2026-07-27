@@ -4,7 +4,7 @@ status: draft   # draft | review | approved | deprecated
 owner: 이성훈
 created: 2026-07-27
 updated: 2026-07-27
-version: v2 (codex 교차검증 반영)
+version: v3 (codex 2차 교차검증 반영)
 related_design: ../detailed/storage-layer.design.md
 ---
 
@@ -45,14 +45,17 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE file_state (
   path            TEXT PRIMARY KEY,      -- .localjira 기준 상대 경로
   kind            TEXT NOT NULL CHECK (kind IN
-                    ('issue','comment','comment_ops','sprint','run','proposal','event')),
+                    ('config','users','project','issue','comment','comment_ops',
+                     'sprint','run','proposal','event')),
   uid             TEXT,                  -- rename 판정의 identity (JSONL은 NULL)
   project         TEXT,
   mtime_ms        INTEGER NOT NULL,
   size            INTEGER NOT NULL,
   dev_inode       TEXT,                  -- 변경 힌트일 뿐 identity 아님
   file_hash       TEXT NOT NULL,         -- 원본 바이트 SHA-256 hex 64자 (≠ ETag, 설계 §3.2)
-  jsonl_offset    INTEGER,               -- JSONL 증분 처리 워터마크
+  jsonl_offset      INTEGER,             -- JSONL 증분 처리 워터마크
+  jsonl_prefix_hash TEXT,                -- offset 이전 구간의 해시.
+                                         -- append와 "기존 줄이 수정됨"을 구별하는 유일한 근거
   indexed_at      INTEGER NOT NULL
 );
 CREATE INDEX ix_file_state_uid  ON file_state(uid);
@@ -60,7 +63,10 @@ CREATE INDEX ix_file_state_kind ON file_state(kind);
 
 -- ── 이슈 ────────────────────────────────────────────────────
 CREATE TABLE issues (
-  uid             TEXT PRIMARY KEY,
+  -- ★PK는 파일 경로다★ — uid를 PK로 두면 중복 uid를 가진 두 파일 중 하나가 적재 단계에서
+  -- 거부되어 §3.6의 "양쪽 보존 후 격리"를 구현할 수 없다. key와 같은 이유로 uid도 비고유다.
+  path            TEXT PRIMARY KEY,
+  uid             TEXT NOT NULL,         -- ★UNIQUE 아님★
   project         TEXT NOT NULL,
   key             TEXT NOT NULL,         -- ★UNIQUE 아님★ — 중복도 담아야 재키잉이 가능하다
   type            TEXT NOT NULL CHECK (type IN
@@ -81,12 +87,16 @@ CREATE TABLE issues (
   proposal_id     TEXT,                  -- AI 유래 표시 (D13)
   created_at      TEXT NOT NULL,         -- RFC 3339
   updated_at      TEXT NOT NULL,
-  etag            TEXT NOT NULL,         -- JCS 응답 바이트 SHA-256 hex 64자(HTTP 헤더에서는 "hex64")
+  -- ★API 표현 원본★ — Reader는 인덱스만 본다(설계 §3.1). 위의 낱개 컬럼만으로는 미지
+  -- frontmatter 키와 본문을 복원할 수 없어 GET 응답이 파일과 달라지고 etag가 어긋난다.
+  -- 그래서 JCS 바이트를 통째로 보관하고, 응답과 etag는 이 값에서만 만든다.
+  resource_json   TEXT NOT NULL,
+  etag            TEXT NOT NULL,         -- SHA-256(resource_json) hex 64자(헤더에서는 "hex64")
   state           TEXT NOT NULL DEFAULT 'OK'
                     CHECK (state IN ('OK','INVALID','PENDING_DELETE')),
-  delete_deadline_at INTEGER,            -- PENDING_DELETE 유예 만료 (설계 §3.5, 영속 필수)
-  path            TEXT NOT NULL          -- ★CASCADE 없음★ — 조정기가 상태를 명시적으로 전이시킨다
+  delete_deadline_at INTEGER             -- PENDING_DELETE 유예 만료 (설계 §3.5, 영속 필수)
 );
+CREATE INDEX ix_issues_uid     ON issues(uid);                   -- 중복 uid 탐지·rename 판정
 CREATE INDEX ix_issues_key     ON issues(project, key);          -- 중복 탐지 + alias 조회
 CREATE INDEX ix_issues_board   ON issues(sprint_id, status, board_rank, uid) WHERE state='OK';
 CREATE INDEX ix_issues_backlog ON issues(project, backlog_rank, uid)         WHERE state='OK';
@@ -95,40 +105,67 @@ CREATE INDEX ix_issues_parent  ON issues(parent_uid);
 CREATE INDEX ix_issues_sprint  ON issues(sprint_id) WHERE state='OK';
 CREATE INDEX ix_issues_pending ON issues(delete_deadline_at) WHERE state='PENDING_DELETE';
 
+-- 자식 테이블은 uid가 아니라 ★파일 경로★로 부모를 가리킨다. uid가 비고유가 되면서
+-- FK 대상이 될 수 없고, 중복 uid를 가진 두 파일의 자식 행이 서로 섞여서도 안 된다.
+-- 조회용 uid는 컬럼으로 함께 들고 있는다.
+
 -- 옛 표시 키 alias (D3). 같은 옛 키를 여럿이 가질 수 있으므로 key는 UNIQUE 아님
 CREATE TABLE issue_former_keys (
-  uid         TEXT NOT NULL REFERENCES issues(uid) ON DELETE CASCADE,
+  path        TEXT NOT NULL REFERENCES issues(path) ON DELETE CASCADE,
+  uid         TEXT NOT NULL,
   project     TEXT NOT NULL,
   key         TEXT NOT NULL,
   released_at TEXT NOT NULL,             -- alias 다중 매치 시 최신 우선 정렬용
-  PRIMARY KEY (uid, key)
+  PRIMARY KEY (path, key)
 );
 CREATE INDEX ix_former_keys_lookup ON issue_former_keys(project, key, released_at DESC);
 
 CREATE TABLE issue_labels (
-  uid   TEXT NOT NULL REFERENCES issues(uid) ON DELETE CASCADE,
+  path  TEXT NOT NULL REFERENCES issues(path) ON DELETE CASCADE,
+  uid   TEXT NOT NULL,
   label TEXT NOT NULL,
-  PRIMARY KEY (uid, label)
+  PRIMARY KEY (path, label)
 );
 -- label 선행 인덱스 — AC13의 "라벨로 먼저 좁히는" 필터 경로
 CREATE INDEX ix_labels_by_label ON issue_labels(label, uid);
 
 CREATE TABLE issue_links (
-  from_uid TEXT NOT NULL REFERENCES issues(uid) ON DELETE CASCADE,
+  path     TEXT NOT NULL REFERENCES issues(path) ON DELETE CASCADE,
+  from_uid TEXT NOT NULL,
   to_uid   TEXT NOT NULL,                -- FK 없음 — dangling 링크도 담는다
   kind     TEXT NOT NULL CHECK (kind IN
              ('blocks','blocked_by','relates_to','duplicates')),
-  PRIMARY KEY (from_uid, to_uid, kind)
+  PRIMARY KEY (path, to_uid, kind)
 );
-CREATE INDEX ix_links_to ON issue_links(to_uid, kind);
+CREATE INDEX ix_links_from ON issue_links(from_uid, kind);
+-- 역방향 조회 — 링크는 선언한 쪽 파일에만 저장하고 반대 방향은 여기서 계산한다 (S1-D4)
+CREATE INDEX ix_links_to   ON issue_links(to_uid, kind);
 
 CREATE TABLE issue_acceptance (
-  uid   TEXT NOT NULL REFERENCES issues(uid) ON DELETE CASCADE,
+  path  TEXT NOT NULL REFERENCES issues(path) ON DELETE CASCADE,
+  uid   TEXT NOT NULL,
   ac_id TEXT NOT NULL,
   seq   INTEGER NOT NULL,
   text  TEXT NOT NULL,
   done  INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0,1)),
-  PRIMARY KEY (uid, ac_id)
+  PRIMARY KEY (path, ac_id)
+);
+
+-- 보드 설정 파일도 SoT다 — 재빌드 추적에서 빠지면 ADR-001의 "파일만으로 전체 복구"가 깨진다
+CREATE TABLE projects (
+  key             TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  timezone        TEXT NOT NULL,
+  estimation_unit TEXT NOT NULL,         -- story_points 고정 (D8)
+  issue_seq       INTEGER NOT NULL DEFAULT 0,
+  resource_json   TEXT NOT NULL,
+  etag            TEXT NOT NULL,
+  path            TEXT NOT NULL
+);
+
+CREATE TABLE board_config (
+  k             TEXT PRIMARY KEY,        -- board_id, schema_version, default_project, created_at
+  v             TEXT NOT NULL
 );
 
 -- ── 전문 검색 ────────────────────────────────────────────────
@@ -184,7 +221,11 @@ CREATE TABLE comments (
   resolved     INTEGER NOT NULL DEFAULT 0 CHECK (resolved IN (0,1)),
   deleted      INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0,1)),
   created_at   TEXT NOT NULL,
-  last_op_id   TEXT,                     -- 재생 워터마크 (op_id 정렬 기준, 설계 §3.3)
+  -- ★단일 최대 워터마크를 쓰지 않는다★ — op는 `op_id` 정렬로 재생하는데, 머지로 나중에
+  -- 합쳐진 op가 기존 최대값보다 작은 op_id를 가질 수 있다. max 워터마크를 신뢰하면 그 op는
+  -- 영원히 누락된다. 대신 op 파일의 해시를 들고 있다가 달라지면 ★전체 집합을 재생★한다.
+  ops_file_hash TEXT,                    -- 마지막으로 재생한 .ops.jsonl의 file_hash
+  ops_applied   INTEGER NOT NULL DEFAULT 0,  -- 재생한 op 수 (진단용)
   body_path    TEXT NOT NULL,            -- 원문 파일
   ops_path     TEXT                      -- op 파일 (없을 수 있음)
 );
@@ -287,8 +328,10 @@ PRAGMA journal_mode = WAL;
 PRAGMA synchronous  = FULL;       -- 여기가 끊기면 복구 근거가 사라진다 (설계 §3.4)
 
 CREATE TABLE outbox (
-  op_id         TEXT PRIMARY KEY,        -- ULID
-  seq           INTEGER NOT NULL,        -- 단조 증가. 재생 순서
+  -- ★seq가 PK다★ — 재생 순서가 CAS의 전제이므로 전순서를 DB가 강제해야 한다.
+  -- seq를 단순 INTEGER로 두면 동률·중복이 허용되어 크래시 재생 순서가 비결정적이 된다.
+  seq           INTEGER PRIMARY KEY AUTOINCREMENT,
+  op_id         TEXT NOT NULL UNIQUE,    -- ULID
   kind          TEXT NOT NULL CHECK (kind IN ('create','update','delete')),
   stage         TEXT NOT NULL CHECK (stage IN
                   ('PENDING','FILE_DONE','INDEX_DONE','EVENT_DONE','DONE','ABORTED')),

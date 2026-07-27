@@ -4,7 +4,7 @@ status: draft   # draft | review | approved | deprecated
 owner: 이성훈
 created: 2026-07-27
 updated: 2026-07-27
-version: v2 (codex 교차검증 30건 반영)
+version: v3 (codex 2차 교차검증 9건 반영)
 related_requirements: ../../2_requirements/prd/backlog-sprint.md
 related_stories: r08a, r08b, r08c, r09, r10, r11a, r11b, r21, r26
 ---
@@ -104,8 +104,14 @@ SHA-256을 따옴표로 감싼 `"hex64"`를 강한 ETag로 사용한다. 따라�
 > 유니코드 정규화(NFC/NFD)도 **하지 않는다.** 코드 조각·식별자에서 의미가 바뀔 수 있다.
 > macOS(NFD)와 Linux(NFC)가 같은 제목에 다른 ETag를 낼 수 있다는 위험은 남으며, OQ5로 남긴다.
 
-**서버가 파일을 쓸 때**는 정규화된 형식(키 정렬·LF·2-space indent)으로 쓴다. API로 한 번 저장한
-뒤에는 `file_hash`도 안정적이다.
+**서버가 파일을 쓸 때는 알려진 필드만 제자리에서 고친다(lossless patch).** 파일 전체를 정규화
+형식으로 재작성하지 않는다 — PRD §5.3이 미지 키와 본문을 원문 그대로 보존하라고 요구하는데,
+전체 재작성은 사용자가 적어둔 키 순서와 서식을 말없이 바꾸는 것이기 때문이다. 서버가 새로
+만드는 파일만 정규화 형식(키 정렬·LF·2-space indent)으로 쓴다.
+
+**인덱스는 리소스 JSON을 통째로 보관한다.** Reader는 인덱스만 보므로(§3.1), 낱개 컬럼만으로는
+미지 키와 본문을 복원할 수 없어 GET 응답이 파일과 달라지고 ETag가 어긋난다. `issues.resource_json`
+(JCS 바이트)이 응답과 ETag의 유일한 출처이며, 나머지 컬럼은 필터·정렬용 파생값이다.
 
 ### 3.3 파일 종류와 추적
 
@@ -114,16 +120,20 @@ SHA-256을 따옴표로 감싼 `"hex64"`를 강한 ETag로 사용한다. 따라�
 
 | 종류 | 경로 | 파싱 산출 |
 |---|---|---|
+| 보드 설정 | `config.yaml` | board_config |
+| 사용자 목록 | `users.yaml` | users(식별자·표시명·역할만) |
+| 프로젝트 | `projects/{P}.yaml` | projects |
 | 이슈 | `issues/{P}/{KEY}.md` | issues + labels + links + acceptance + FTS |
 | 코멘트 원문 | `comments/{KEY}/{ULID}.md` | comments(초기값) |
-| 코멘트 op | `comments/{KEY}/{ULID}.ops.jsonl` | comments에 재생 적용(`ops_applied` 워터마크) |
+| 코멘트 op | `comments/{KEY}/{ULID}.ops.jsonl` | comments에 재생 적용(`ops_file_hash` 변경 시 전체 재생) |
 | 스프린트 | `sprints/{P}/{ID}.yaml` | sprints + burndown_snapshots |
 | 실행 로그 | `runs/{P}/{YYYY-MM}/{ULID}.json` | runs + run_commits |
 | 제안 | `proposals/{P}/{ULID}.yaml` | proposals |
 | 이벤트 | `events/{date}/{node}.jsonl` | events(추가분만, 오프셋 워터마크) |
 
-- JSONL 계열은 **바이트 오프셋 워터마크**를 `file_state`에 두어 append분만 증분 처리한다. 파일이 줄어들었거나 앞부분 해시가 달라지면 전체 재파싱한다.
-- 코멘트 현재 상태는 **원문 + op 재생 결과**다. 재생 순서는 `.ops.jsonl`의 **줄 순서**이며, 머지로 순서가 섞일 수 있으므로 각 op에 `op_id`(ULID)를 넣고 **`op_id` 정렬로 재생**한다(결정적).
+- JSONL 계열은 `file_state`에 **바이트 오프셋 + 그 앞 구간의 `jsonl_prefix_hash`** 를 함께 둔다. 오프셋만으로는 "뒤에 붙었다"와 "앞이 수정됐다"를 구별할 수 없으므로, prefix hash가 같을 때만 append분을 증분 처리하고 다르면 전체 재파싱한다.
+- 코멘트 현재 상태는 **원문 + op 재생 결과**다. 각 op에 `op_id`(ULID)를 넣고 **`op_id` 정렬로 재생**한다(결정적).
+- **재생 진행을 최대 `op_id` 워터마크로 추적하지 않는다.** 머지는 기존 최대값보다 **작은** `op_id`를 뒤늦게 끼워 넣을 수 있고, max 워터마크는 그 op를 영구히 건너뛴다. 대신 `.ops.jsonl`의 `file_hash`를 기억했다가 달라지면 **op 집합 전체를 재생**한다(재생은 멱등이라 반복해도 결과가 같다).
 
 ### 3.4 쓰기 트랜잭션 (WriteTxn)
 
@@ -296,7 +306,10 @@ D3의 "결정적"을 계산식으로 확정한다. **두 클론이 각자 조정
 1. 조정 Stage B에서 ★모든 충돌을 한 번에 수집★
      collisions = { key → [uid…] }  (그 프로젝트 전체)
 2. 스냅샷 고정: N = 조정 시작 시점 스캔 결과의 그 프로젝트 최대 키 번호
-3. 각 그룹 내 정렬: uid 문자열 사전순 → C[0]이 승자(키 유지), C[1..]이 패자
+3. 각 그룹 내 정렬: **ULID 타임스탬프(앞 48비트) 오름차순 → 동률이면 uid 문자열 사전순**
+     → C[0]이 승자(키 유지), C[1..]이 패자
+   *(순수 사전순만 쓰면 손으로 넣은 비정상 uid에서 D3의 "먼저 만들어진 쪽이 이긴다"와 어긋난다.
+     ULID 형식이 아닌 uid는 재키잉 대상이 아니라 §3.6의 격리 대상이다.)*
 4. 전역 패자 목록을 (원래 키 번호, 패자 uid) 사전순으로 정렬
 5. 그 순서대로 N+1, N+2, … 배정
 ```
@@ -315,16 +328,19 @@ D3의 "결정적"을 계산식으로 확정한다. **두 클론이 각자 조정
 
 **alias 조회 계약**
 
-| 상황 | 응답 |
+| 상황 | `GET /issues/{key}` 응답 |
 |---|---|
-| 현재 키 소유자 있음 | 그 이슈를 반환하되, **같은 키를 `former_keys`로 가진 이슈가 있으면 `alias_candidates[]`에 함께 실어 보낸다** |
+| 현재 키 소유자 있음 | **그 이슈만** 반환한다. 단일 리소스 조회의 의미를 흐리지 않는다 |
 | 현재 키 소유자 없음 + alias 1건 | 그 이슈 반환 + `moved_to` 힌트 |
-| 현재 키 소유자 없음 + alias 2건 이상 | **임의 선택 금지.** 후보 배열만 반환하고 UI·호출자가 고르게 한다 |
-| FTS | 현재 키와 alias 모두 색인. alias 매치는 "옛 키" 배지 |
+| 현재 키 소유자 없음 + alias 2건 이상 | **임의 선택 금지.** 후보 배열을 담아 **409**로 답하고 호출자가 고르게 한다 |
 
-> v1은 "현재 키 우선"만 정하고 끝냈는데, 그러면 재키잉된 이슈는 옛 키로 **영원히 도달 불가**였다.
-> `alias_candidates[]`가 그 구멍을 막는다. R23 커밋 연결은 **후보가 2건 이상이면 연결하지 않고**
-> 후보만 기록한다 — 엉뚱한 이슈에 커밋이 붙는 것보다 낫다.
+옛 키 이력은 **별도 조회 경로**(`GET /keys/{key}/history`)로 노출한다. 현재 소유자가 있는 키에
+과거 소유자 후보를 늘 끼워 보내면 단일 조회 응답이 다중 선택 문제로 오염된다.
+
+> v1은 "현재 키 우선"만 정하고 끝내 재키잉된 이슈가 옛 키로 **도달 불가**했다. 도달 경로는
+> 필요하지만, 그 자리는 단일 리소스 GET이 아니라 이력 API다.
+> FTS는 현재 키와 alias를 모두 색인하고 alias 매치에 "옛 키" 배지를 단다.
+> R23 커밋 연결은 이력 API를 쓰며, **후보가 2건 이상이면 연결하지 않고** 후보만 기록한다.
 
 ### 3.9 변경 전파 (SSE)
 
@@ -345,7 +361,7 @@ AC3의 "새로고침 없이 3초 이내"를 SSE로 구현한다. WebSocket은 �
 | 프로세스 간 | `.local/server.lock`을 열어 **`flock`(LOCK_EX\|LOCK_NB)** 을 잡는다. 획득 실패 = 이미 실행 중 → 기동 거부(파일 안의 pid·시작시각 출력). **프로세스가 죽으면 OS가 잠금을 자동 해제**하므로 stale lock 판정·삭제·재생성이 필요 없다 |
 | | *(v1의 pid 생존 검사 후 삭제 방식은 TOCTOU이고 pid 재사용에 오판한다 — 폐기)* |
 | 파일 단위 | 경로별 async mutex(직렬 큐) |
-| 논리 단위 | ETag `If-Match` 불일치 → **412** + 현재 문서 전문 + 최신 ETag + 거부된 요청 값 |
+| 논리 단위 | `If-Match` **누락 → 428** Precondition Required / **불일치 → 412** Precondition Failed + 현재 문서 전문 + 최신 ETag + 거부된 요청 값 (D15) |
 | 런타임 상태 | claim/lease는 `runtime.sqlite`. 재기동 시 만료분 전량 회수, AC2 동치 비교에서 제외 |
 
 ## 4. 대안 및 트레이드오프
