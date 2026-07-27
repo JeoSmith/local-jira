@@ -50,7 +50,11 @@ M0 `doctor`는 무의존으로 유지한다. 이후 필요한 기능은 사용 �
 
 - OS advisory lock: Node core에 직접 API가 없으므로 M0 mutation 착수 전에 native binding 또는
   작은 플랫폼 adapter를 검증한다. PID/stale-time 기반 lock package로 대체하지 않는다.
-- SQLite: M1 착수 시 WAL·FTS5·backup/generation switch 지원 여부를 기준으로 driver를 선택한다.
+- SQLite: **`node:sqlite` 채택 (2026-07-27, M1 착수 시 확정)**. Node 24 내장이라 의존성이 늘지 않는다.
+  실측 확인: SQLite 3.53.0 · **FTS5 및 `trigram` 토크나이저 지원**(설계 OQ1의 선택지가 둘 다 열려 있다) ·
+  `journal_mode=wal`·`synchronous` 설정 가능 · `backup` API 제공 · `Session` 제공.
+  generation switch(§3.7)는 backup API가 아니라 별도 파일에 빌드 후 `rename`으로 수행하므로
+  드라이버 요구사항이 아니다.
 - HTTP·validation·watcher: M1 API 상세 설계 후 선택한다.
 
 편의를 위해 framework를 먼저 들이지 않는다. ADR의 durability·locking 계약을 만족하는지 확인한 뒤
