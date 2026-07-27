@@ -11,7 +11,8 @@ export type DiagnosticCode =
   | "E_BOARD_PATH_OCCUPIED"
   | "E_BRANCH_CHECKED_OUT"
   | "E_WRONG_WORKTREE_BRANCH"
-  | "E_INCOMPLETE_BOARD";
+  | "E_INCOMPLETE_BOARD"
+  | "E_PARTIAL_BOOTSTRAP";
 
 export interface Worktree {
   path: string;

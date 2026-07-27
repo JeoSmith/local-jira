@@ -429,7 +429,18 @@ orphan 판정은 “parent가 0개”만 보지 않는다. 이후 commit에는 p
   Apple Git 2.39.5의 격리 fixture에서 검증했다.
 - code `.gitignore`의 `/.localjira/`는 M0가 직접 수정하되 commit하지 않는 것으로 확정한다.
 - **OQ-M0-1** Windows 지원 시 worktree move, advisory lock, 파일 권한의 동등 계약. 지원 전에는
-  명시적인 platform 오류로 중단하고 부분 동작하지 않는다.
+  명시적인 platform 오류로 중단하고 부분 동작하지 않는다. → 구현됨(`E_PLATFORM_UNSUPPORTED`).
+- **OQ-M0-2 (미해소)** **Linux advisory lock 실기 검증.** macOS/BSD는 `open(2)`의 `O_EXLOCK`으로
+  in-process 잠금이 가능하지만 Linux에는 그 플래그가 없고, **모르는 플래그를 거부하지 않고 무시**하기
+  때문에 같은 코드를 쓰면 잠금 없이 성공한 fd를 돌려준다. 그래서 Linux는 `flock(1)` 헬퍼 프로세스로
+  분리했다.
+  - 검증된 것: 헬퍼 호출 계약 — 인자 벡터, 획득 마커, 충돌 종료코드(75), 일반 실패와 충돌의 구분,
+    `release()`가 stdin을 닫아 헬퍼가 EOF로 정상 종료하는 것 (`test/bootstrap/lock-linux-contract.test.ts`,
+    PATH에 스텁 `flock`을 심어 실행).
+  - **검증되지 않은 것: 커널 수준 상호배제와 프로세스 사망 시 자동 해제.** 개발 환경이 macOS이고
+    컨테이너 런타임이 없어 실행할 수 없었다. Linux에서 `npm test`를 한 번 돌리면
+    `lock.test.ts`의 6개 케이스(중복 획득 거부·해제 후 재획득·SIGKILL 후 회수 포함)가 그대로
+    Linux 경로를 검증한다. **첫 Linux 배포 전 필수.**
 
 ## 13. 참고
 

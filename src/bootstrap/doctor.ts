@@ -77,6 +77,19 @@ export function inspectBootstrap(cwd: string): DoctorReport {
     return withIssue(report, pathIssue);
   }
 
+  // A crashed init leaves its temporary worktree behind. Reporting it is the
+  // difference between "the board is missing" and "an init died halfway" —
+  // §9.4 requires that partial state be visible rather than silently ignored.
+  const abandoned = findAbandonedInitWorktrees(worktrees, repoRoot);
+  if (abandoned.length > 0) {
+    return withIssue(report, {
+      code: "E_PARTIAL_BOOTSTRAP",
+      message: `A previous localjira init left temporary worktrees behind: ${abandoned.join(", ")}`,
+      recovery:
+        "Inspect them, then remove with: git worktree remove --force <path> (and git branch -D localjira/data if it was created but never attached).",
+    });
+  }
+
   if (!localBranchExists && !existsSync(boardPath)) {
     return { ...report, status: "UNINITIALIZED" };
   }
@@ -175,6 +188,16 @@ function inspectBoardPath(
   }
 
   return null;
+}
+
+function findAbandonedInitWorktrees(
+  worktrees: Worktree[],
+  repoRoot: string,
+): string[] {
+  const prefix = path.join(repoRoot, `${BOARD_DIRECTORY}.init-`);
+  return worktrees
+    .filter((worktree) => worktree.path.startsWith(prefix))
+    .map((worktree) => worktree.path);
 }
 
 function hasIgnoreRule(file: string, expected: string): boolean {

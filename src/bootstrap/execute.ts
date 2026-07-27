@@ -106,8 +106,10 @@ export function executePlan(
 
   for (const action of plan.actions) {
     try {
+      crashPointBefore(action);
       runAction(action, options, state);
       state.completed.push(action);
+      crashPointAfter(action);
     } catch (error) {
       // A failed push leaves a perfectly good local board behind. Tearing it
       // down would destroy more than it protects (design §5.5).
@@ -128,6 +130,26 @@ export function executePlan(
     nodeId: state.nodeId,
     codeIgnoreChanged: state.codeIgnoreChanged,
   };
+}
+
+/**
+ * Fault-injection hooks (design §9.4).
+ *
+ * `process.abort()` rather than a thrown error: a thrown error would run the
+ * rollback path, which is precisely what a real crash does *not* do. These are
+ * inert unless the environment variable names an action, and the variable is
+ * only ever set by tests.
+ */
+function crashPointBefore(action: BootstrapAction): void {
+  if (process.env.LOCALJIRA_CRASH_BEFORE === action) {
+    process.abort();
+  }
+}
+
+function crashPointAfter(action: BootstrapAction): void {
+  if (process.env.LOCALJIRA_CRASH_AFTER === action) {
+    process.abort();
+  }
 }
 
 function runAction(

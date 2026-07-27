@@ -21,6 +21,8 @@ const BSD_PLATFORMS = new Set(["darwin", "freebsd", "openbsd", "netbsd"]);
 /** Distinguishes "could not lock" from an exit code of the helper's command. */
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const FLOCK_ACQUIRED_MARKER = "R";
+/** How long a helper gets to exit on EOF before it is signalled. */
+const FLOCK_EXIT_GRACE_MS = 2_000;
 
 export type LockMechanism = "bsd_o_exlock" | "linux_flock_helper";
 
@@ -78,17 +80,18 @@ export function isLockSupportedPlatform(
  */
 export async function acquireBootstrapLock(
   gitCommonDir: string,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<BootstrapLock> {
   const lockPath = bootstrapLockPath(gitCommonDir);
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
 
-  if (BSD_PLATFORMS.has(process.platform)) {
+  if (BSD_PLATFORMS.has(platform)) {
     return acquireWithOpenExlock(lockPath);
   }
-  if (process.platform === "linux") {
+  if (platform === "linux") {
     return acquireWithFlockHelper(lockPath);
   }
-  throw new BootstrapLockUnsupportedError(process.platform);
+  throw new BootstrapLockUnsupportedError(platform);
 }
 
 class OpenExlockLock implements BootstrapLock {
@@ -155,10 +158,15 @@ class FlockHelperLock implements BootstrapLock {
     }
     const child = this.#child;
     this.#child = null;
+
     // Closing stdin ends the helper's `cat`, which makes flock exit and the
-    // kernel drop the lock. kill() is the fallback if it ignores EOF.
+    // kernel drop the lock. Signalling immediately would kill the helper before
+    // it can take that path, so the signal is only a fallback for a helper that
+    // ignores EOF. The timer is unref'd so it never holds the process open.
     child.stdin.end();
-    child.kill("SIGTERM");
+    const fallback = setTimeout(() => child.kill("SIGKILL"), FLOCK_EXIT_GRACE_MS);
+    fallback.unref();
+    child.once("exit", () => clearTimeout(fallback));
   }
 }
 
@@ -169,7 +177,7 @@ class FlockHelperLock implements BootstrapLock {
  * pipe closes, the command exits, and the kernel releases the lock — the same
  * crash behaviour as the BSD path.
  */
-function acquireWithFlockHelper(lockPath: string): Promise<BootstrapLock> {
+export function acquireWithFlockHelper(lockPath: string): Promise<BootstrapLock> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "flock",

@@ -69,7 +69,9 @@ git 대량 변경, SQLite 인덱스 유실 뒤에도 파일 SoT에서 일관된 
       `localjira/data` orphan 브랜치·worktree를 만든다(배치 결정은
       [ADR-006](../../0_decisions/adr-006-shared-board-data-branch.md), 설계는
       [M0 부트스트랩](../../3_designs/detailed/m0-bootstrap.design.md)).
-      *(남은 것: Linux advisory lock 경로 실기 검증, M0 자체의 fault injection 테스트)*
+      fault injection(설계 §9.4)은 7개 mutation 지점 전부에서 통과한다.
+      **잔여: Linux advisory lock 실기 검증 하나**(OQ-M0-2) — 개발 환경이 macOS라 실행 불가.
+      Linux에서 `npm test` 1회면 닫힌다. M1 착수를 막지는 않지만 **Linux 배포 전 필수**다.
 - [x] **저장 계층 기준선 확정** — [저장 계층 상세 설계](../../3_designs/detailed/storage-layer.design.md) v3와
       [SQLite 스키마](../../3_designs/database/index-schema.md) v3. codex 교차검증 2회(30건 + 9건) 반영 완료.
 - [x] **계약 영향 미정 항목 결정** — [착수 결정 로그](sprint-01-decisions.md) S1-D1~S1-D13.
