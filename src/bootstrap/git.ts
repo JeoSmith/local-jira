@@ -58,6 +58,15 @@ export function resolveCurrentRoot(cwd: string): string | null {
   return result.ok ? canonicalPath(result.stdout) : null;
 }
 
+export function resolveGitCommonDir(cwd: string): string | null {
+  const result = runGit(
+    cwd,
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    { allowFailure: true },
+  );
+  return result.ok ? canonicalPath(result.stdout) : null;
+}
+
 export function listWorktrees(cwd: string): Worktree[] {
   const output = runGit(cwd, ["worktree", "list", "--porcelain"]).stdout;
   const records = output.split(/\n\n+/).filter(Boolean);
