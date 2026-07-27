@@ -23,6 +23,8 @@ const FLOCK_CONFLICT_EXIT_CODE = 75;
 const FLOCK_ACQUIRED_MARKER = "R";
 /** How long a helper gets to exit on EOF before it is signalled. */
 const FLOCK_EXIT_GRACE_MS = 2_000;
+/** Owner-only: the lock file sits inside the git common dir. */
+const LOCK_FILE_MODE = 0o600;
 
 export type LockMechanism = "bsd_o_exlock" | "linux_flock_helper";
 
@@ -57,7 +59,14 @@ export interface BootstrapLock {
   readonly path: string;
   readonly mechanism: LockMechanism;
   readonly held: boolean;
-  release(): void;
+  /**
+   * Resolves once the lock is actually gone, not merely once release was asked
+   * for. On Linux the lock lives in a child process, so releasing it is
+   * inherently asynchronous — a caller that re-acquires without awaiting would
+   * race its own helper and get E_BOOTSTRAP_BUSY. The BSD path resolves
+   * immediately but keeps the same signature so callers need not branch.
+   */
+  release(): Promise<void>;
 }
 
 export function bootstrapLockPath(gitCommonDir: string): string {
@@ -108,7 +117,7 @@ class OpenExlockLock implements BootstrapLock {
     return this.#fd !== null;
   }
 
-  release(): void {
+  async release(): Promise<void> {
     if (this.#fd === null) {
       return;
     }
@@ -127,7 +136,7 @@ function acquireWithOpenExlock(lockPath: string): BootstrapLock {
 
   let fd: number;
   try {
-    fd = fs.openSync(lockPath, flags, 0o600);
+    fd = fs.openSync(lockPath, flags, LOCK_FILE_MODE);
   } catch (error) {
     if (isContentionError(error)) {
       throw new BootstrapBusyError(lockPath);
@@ -152,21 +161,36 @@ class FlockHelperLock implements BootstrapLock {
     return this.#child !== null;
   }
 
-  release(): void {
+  release(): Promise<void> {
     if (this.#child === null) {
-      return;
+      return Promise.resolve();
     }
     const child = this.#child;
     this.#child = null;
 
-    // Closing stdin ends the helper's `cat`, which makes flock exit and the
-    // kernel drop the lock. Signalling immediately would kill the helper before
-    // it can take that path, so the signal is only a fallback for a helper that
-    // ignores EOF. The timer is unref'd so it never holds the process open.
-    child.stdin.end();
-    const fallback = setTimeout(() => child.kill("SIGKILL"), FLOCK_EXIT_GRACE_MS);
-    fallback.unref();
-    child.once("exit", () => clearTimeout(fallback));
+    return new Promise((resolve) => {
+      // The helper was unref'd while idle; hold the loop open until it is gone,
+      // otherwise the process could exit before the lock is actually released.
+      child.ref();
+
+      const fallback = setTimeout(
+        () => child.kill("SIGKILL"),
+        FLOCK_EXIT_GRACE_MS,
+      );
+      fallback.unref();
+
+      // "close" rather than "exit": it fires after the helper has exited *and*
+      // its stdio has been drained, which is when the kernel has certainly
+      // dropped the lock.
+      child.once("close", () => {
+        clearTimeout(fallback);
+        resolve();
+      });
+
+      // Closing stdin ends the helper's `cat`, which makes flock exit. The
+      // signal above is only a fallback for a helper that ignores EOF.
+      child.stdin.end();
+    });
   }
 }
 
@@ -178,6 +202,11 @@ class FlockHelperLock implements BootstrapLock {
  * crash behaviour as the BSD path.
  */
 export function acquireWithFlockHelper(lockPath: string): Promise<BootstrapLock> {
+  // flock(1) creates the file itself, under the runner's umask, so it would end
+  // up world-readable. Create it here first with the mode the design asks for;
+  // the BSD path gets this from open(2) directly.
+  ensureLockFileMode(lockPath);
+
   return new Promise((resolve, reject) => {
     const child = spawn(
       "flock",
@@ -222,7 +251,10 @@ export function acquireWithFlockHelper(lockPath: string): Promise<BootstrapLock>
       reject(error);
     });
 
-    child.once("exit", (code) => {
+    // "close" rather than "exit": exit can fire before stderr has been read,
+    // which would drop the helper's own error message from the report and leave
+    // the user with a bare exit code.
+    child.once("close", (code) => {
       if (settled) {
         return;
       }
@@ -238,6 +270,22 @@ export function acquireWithFlockHelper(lockPath: string): Promise<BootstrapLock>
       );
     });
   });
+}
+
+function ensureLockFileMode(lockPath: string): void {
+  try {
+    fs.closeSync(
+      fs.openSync(
+        lockPath,
+        fs.constants.O_CREAT | fs.constants.O_RDWR,
+        LOCK_FILE_MODE,
+      ),
+    );
+    fs.chmodSync(lockPath, LOCK_FILE_MODE);
+  } catch {
+    // A pre-existing file owned by another user cannot be chmod'd. The lock
+    // still works; only the permission hardening is best effort.
+  }
 }
 
 function isContentionError(error: unknown): boolean {

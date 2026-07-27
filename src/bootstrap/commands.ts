@@ -203,7 +203,7 @@ async function withBootstrapLock<T>(
   try {
     return await body();
   } finally {
-    lock.release();
+    await lock.release();
   }
 }
 

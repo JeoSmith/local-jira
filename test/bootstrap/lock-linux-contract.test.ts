@@ -13,13 +13,16 @@ import {
 } from "../../src/bootstrap/lock.ts";
 
 /**
- * The Linux path holds the lock through `flock(1)`, and this machine is macOS,
- * so the kernel behaviour cannot be exercised here. What *can* be pinned down
- * is the contract with the helper: the argument vector, the "acquired" marker,
- * the conflict exit code, and that the parent keeps stdin open.
+ * The Linux path holds the lock through `flock(1)`. A stub `flock` on PATH pins
+ * down the half that is ours — the argument vector, the "acquired" marker, the
+ * conflict exit code, and that release closes stdin rather than signalling —
+ * and it does so on every platform, including the macOS dev machine where a
+ * real `flock` does not exist.
  *
- * A stub `flock` on PATH covers exactly that. It does not prove the lock works
- * on Linux — that still needs a Linux run (see the M0 verification note).
+ * It proves nothing about the kernel. Mutual exclusion and release-on-death are
+ * covered by `lock.test.ts`, which exercises whichever mechanism the host
+ * actually uses; CI runs it on ubuntu-latest so the Linux mechanism is covered
+ * there (OQ-M0-2).
  */
 
 interface Stub {
@@ -138,7 +141,7 @@ test("releasing closes the helper's stdin so the kernel drops the lock", async (
   const lock = await withPath(stub.dir, () => acquireWithFlockHelper(lockPath));
   assert.equal(lock.held, true);
 
-  lock.release();
+  await lock.release();
   assert.equal(lock.held, false);
 
   await waitFor(() => fs.existsSync(marker), 5_000);

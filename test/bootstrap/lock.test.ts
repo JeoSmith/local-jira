@@ -56,7 +56,7 @@ test("re-acquires after release", { skip: !supported }, async (t) => {
   const commonDir = makeCommonDir(t);
 
   const first = await acquireBootstrapLock(commonDir);
-  first.release();
+  await first.release();
   assert.equal(first.held, false);
 
   const second = await acquireBootstrapLock(commonDir);
@@ -68,8 +68,8 @@ test("release is idempotent", { skip: !supported }, async (t) => {
   const commonDir = makeCommonDir(t);
 
   const lock = await acquireBootstrapLock(commonDir);
-  lock.release();
-  lock.release();
+  await lock.release();
+  await lock.release();
 
   const again = await acquireBootstrapLock(commonDir);
   t.after(() => again.release());
@@ -88,7 +88,7 @@ test("ownership never depends on the lock file existing", { skip: !supported }, 
   assert.equal(fs.existsSync(lockPath), true);
   await assert.rejects(() => acquireBootstrapLock(commonDir), BootstrapBusyError);
 
-  lock.release();
+  await lock.release();
   // Released without deleting the file — the next acquisition still succeeds,
   // so no stale-file cleanup path exists to get wrong (ADR-002).
   assert.equal(fs.existsSync(lockPath), true);
