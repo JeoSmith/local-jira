@@ -14,12 +14,26 @@ import {
   BootstrapBusyError,
   BootstrapLockUnsupportedError,
 } from "./bootstrap/lock.ts";
+import {
+  findIssue,
+  indexStatus,
+  listIssues,
+  openBoard,
+  type IndexStatus,
+  type IssueDetail,
+  type IssueSummary,
+} from "./storage/board.ts";
 
 const USAGE = `Usage:
   localjira doctor [--json]
   localjira init --project-key <KEY> --project-name <NAME> --timezone <TZ>
                  [--remote <NAME>] [--push] [--json]
   localjira repair-worktree [--remote <NAME>] [--json]
+
+  localjira index status [--json]
+  localjira index rebuild [--json]
+  localjira issue list [--project <KEY>] [--status <STATUS>] [--limit <N>] [--json]
+  localjira issue show <KEY> [--json]
 `;
 
 const [command, ...argv] = process.argv.slice(2);
@@ -34,6 +48,12 @@ try {
       break;
     case "repair-worktree":
       await runRepairCommand(argv);
+      break;
+    case "index":
+      runIndexCommand(argv);
+      break;
+    case "issue":
+      runIssueCommand(argv);
       break;
     default:
       process.stderr.write(USAGE);
@@ -101,6 +121,188 @@ async function runRepairCommand(args: string[]): Promise<void> {
   });
 
   report(result, options.flags.has("--json"));
+}
+
+function runIndexCommand(args: string[]): void {
+  const [sub, ...rest] = args;
+  if (sub !== "status" && sub !== "rebuild") {
+    process.stderr.write(USAGE);
+    process.exitCode = 2;
+    return;
+  }
+
+  const options = parseArgs(rest, new Set(), new Set(["--json"]));
+  const board = openBoard(process.cwd(), { rebuild: sub === "rebuild" });
+  try {
+    const status = indexStatus(board);
+    if (options.flags.has("--json")) {
+      write(JSON.stringify(status, null, 2));
+    } else {
+      printIndexStatus(status);
+    }
+    process.exitCode = status.errors.length > 0 ? 1 : 0;
+  } finally {
+    board.close();
+  }
+}
+
+function runIssueCommand(args: string[]): void {
+  const [sub, ...rest] = args;
+
+  if (sub === "list") {
+    const options = parseArgs(
+      rest,
+      new Set(["--project", "--status", "--limit"]),
+      new Set(["--json"]),
+    );
+    const board = openBoard(process.cwd());
+    try {
+      const issues = listIssues(board, {
+        project: options.values.get("--project"),
+        status: options.values.get("--status"),
+        limit: options.values.has("--limit")
+          ? Number(options.values.get("--limit"))
+          : undefined,
+      });
+      if (options.flags.has("--json")) {
+        write(JSON.stringify(issues, null, 2));
+      } else {
+        printIssueTable(issues);
+      }
+    } finally {
+      board.close();
+    }
+    return;
+  }
+
+  if (sub === "show") {
+    const [key, ...flags] = rest;
+    if (!key || key.startsWith("--")) {
+      process.stderr.write(`issue show requires an issue key\n${USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+
+    const options = parseArgs(flags, new Set(), new Set(["--json"]));
+    const board = openBoard(process.cwd());
+    try {
+      const found = findIssue(board, key);
+      if (found === null) {
+        process.stderr.write(`E_ISSUE_NOT_FOUND: no issue with key ${key}\n`);
+        process.exitCode = 1;
+        return;
+      }
+      if ("ambiguous" in found) {
+        // Choosing one would attach the wrong history to the wrong issue.
+        process.stderr.write(
+          `E_KEY_AMBIGUOUS: ${key} matches ${found.ambiguous.length} issues: ${found.ambiguous.join(", ")}\n`,
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (options.flags.has("--json")) {
+        write(JSON.stringify(found.issue, null, 2));
+      } else {
+        printIssueDetail(found.issue);
+      }
+    } finally {
+      board.close();
+    }
+    return;
+  }
+
+  process.stderr.write(USAGE);
+  process.exitCode = 2;
+}
+
+function printIndexStatus(status: IndexStatus): void {
+  write(`Board: ${status.boardPath}`);
+  if (status.boardId) {
+    write(`Board id: ${status.boardId}`);
+  }
+  write(`Schema version: ${status.schemaVersion ?? "?"}`);
+  write(`Last full rebuild: ${status.lastRebuildAt ?? "never"}`);
+
+  const { mode, reason, stats } = status.refresh;
+  write(
+    `Refresh: ${mode} (${reason}) — scanned ${stats.scanned}, hashed ${stats.hashed}, ` +
+      `parsed ${stats.parsed}, removed ${stats.removed} in ${stats.durationMs}ms`,
+  );
+
+  write("");
+  for (const [label, count] of Object.entries(status.counts)) {
+    write(`  ${label.padEnd(10)} ${String(count).padStart(6)}`);
+  }
+
+  if (status.errors.length > 0) {
+    write("");
+    write(`Files that could not be indexed (${status.errors.length}):`);
+    for (const error of status.errors) {
+      write(`  ! ${error.path}`);
+      write(`      ${error.reason}${error.detail ? `: ${error.detail}` : ""}`);
+    }
+  }
+}
+
+function printIssueTable(issues: IssueSummary[]): void {
+  if (issues.length === 0) {
+    write("No issues.");
+    return;
+  }
+
+  const width = (pick: (issue: IssueSummary) => string, min: number): number =>
+    Math.max(min, ...issues.map((issue) => displayWidth(pick(issue))));
+
+  const keyWidth = width((issue) => issue.key, 3);
+  const statusWidth = width((issue) => issue.status ?? "", 6);
+  const typeWidth = width((issue) => issue.type ?? "", 4);
+
+  for (const issue of issues) {
+    const points = issue.points === null ? "  -" : String(issue.points).padStart(3);
+    const labels = issue.labels.length > 0 ? `  [${issue.labels.join(", ")}]` : "";
+    write(
+      `${pad(issue.key, keyWidth)}  ${pad(issue.status ?? "-", statusWidth)}  ` +
+        `${pad(issue.type ?? "-", typeWidth)}  ${points}  ${issue.title ?? ""}${labels}`,
+    );
+  }
+  write("");
+  write(`${issues.length} issue(s)`);
+}
+
+function printIssueDetail(issue: IssueDetail): void {
+  write(`${issue.key}  ${issue.title ?? ""}`);
+  write("");
+  write(`  uid       ${issue.uid}`);
+  write(`  type      ${issue.type ?? "-"}`);
+  write(`  status    ${issue.status ?? "-"}`);
+  write(`  points    ${issue.points ?? "-"}`);
+  write(`  assignee  ${issue.assignee ?? "-"}`);
+  write(`  sprint    ${issue.sprint ?? "-"}`);
+  write(`  labels    ${issue.labels.length > 0 ? issue.labels.join(", ") : "-"}`);
+  write(`  file      ${issue.path}`);
+  write(`  etag      ${issue.etag}`);
+}
+
+/** Hangul and other wide glyphs occupy two terminal cells. */
+function displayWidth(value: string): number {
+  let width = 0;
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    width +=
+      (code >= 0x1100 && code <= 0x115f) ||
+      (code >= 0x2e80 && code <= 0xa4cf) ||
+      (code >= 0xac00 && code <= 0xd7a3) ||
+      (code >= 0xf900 && code <= 0xfaff) ||
+      (code >= 0xff00 && code <= 0xff60) ||
+      (code >= 0x1f300 && code <= 0x1f64f)
+        ? 2
+        : 1;
+  }
+  return width;
+}
+
+function pad(value: string, width: number): string {
+  return value + " ".repeat(Math.max(0, width - displayWidth(value)));
 }
 
 interface ParsedArgs {
