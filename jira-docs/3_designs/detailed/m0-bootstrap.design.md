@@ -430,20 +430,25 @@ orphan 판정은 “parent가 0개”만 보지 않는다. 이후 commit에는 p
 - code `.gitignore`의 `/.localjira/`는 M0가 직접 수정하되 commit하지 않는 것으로 확정한다.
 - **OQ-M0-1** Windows 지원 시 worktree move, advisory lock, 파일 권한의 동등 계약. 지원 전에는
   명시적인 platform 오류로 중단하고 부분 동작하지 않는다. → 구현됨(`E_PLATFORM_UNSUPPORTED`).
-- **OQ-M0-2 (미해소)** **Linux advisory lock 실기 검증.** macOS/BSD는 `open(2)`의 `O_EXLOCK`으로
-  in-process 잠금이 가능하지만 Linux에는 그 플래그가 없고, **모르는 플래그를 거부하지 않고 무시**하기
-  때문에 같은 코드를 쓰면 잠금 없이 성공한 fd를 돌려준다. 그래서 Linux는 `flock(1)` 헬퍼 프로세스로
-  분리했다.
-  - 검증된 것: 헬퍼 호출 계약 — 인자 벡터, 획득 마커, 충돌 종료코드(75), 일반 실패와 충돌의 구분,
-    `release()`가 stdin을 닫아 헬퍼가 EOF로 정상 종료하는 것 (`test/bootstrap/lock-linux-contract.test.ts`,
-    PATH에 스텁 `flock`을 심어 실행).
-  - **로컬에서 검증할 수 없는 것: 커널 수준 상호배제와 프로세스 사망 시 자동 해제.** 개발 환경이
-    macOS이고 컨테이너 런타임이 없어 실행이 불가능하다. 스텁으로는 흉내낼 수 없는 커널 동작이다.
-  - **해소 경로: CI.** `.github/workflows/ci.yml`이 `ubuntu-latest`와 `macos-latest`에서 전체
-    스위트를 돌린다. `lock.test.ts`의 6개 케이스(중복 획득 거부·해제 후 재획득·**SIGKILL 후 회수**)가
-    Linux 러너에서 그대로 실행되므로, **CI가 초록이면 이 항목은 닫힌다.**
-    사람이 기억해서 한 번 돌리는 방식이 아니라 커밋마다 자동으로 지켜진다.
-    첫 CI 실행 결과를 확인한 뒤 이 OQ를 `해소`로 표시한다.
+- **OQ-M0-2 (해소, 2026-07-27)** **Linux advisory lock 실기 검증.** macOS/BSD는 `open(2)`의
+  `O_EXLOCK`으로 in-process 잠금이 가능하지만 Linux에는 그 플래그가 없고, **모르는 플래그를 거부하지
+  않고 무시**하기 때문에 같은 코드를 쓰면 잠금 없이 성공한 fd를 돌려준다. 그래서 Linux는 `flock(1)`
+  헬퍼 프로세스로 분리했고, 그 경로가 실제로 동작하는지가 열린 질문이었다.
+  - **해소 근거**: CI `.github/workflows/ci.yml`이 `ubuntu-latest`(`node v24.18.0`, `/usr/bin/flock`)와
+    `macos-latest`에서 전체 스위트를 돌린다. 두 번째 실행(run `30247557267`)에서 양쪽 **77/77 통과**.
+    Linux 러너에서 커널 상호배제(중복 획득 거부·해제 후 재획득)와 **SIGKILL 후 자동 회수**가 모두 확인됐다.
+  - **첫 실행은 실패했고, 그것이 이 항목을 열어둔 값어치였다.** ubuntu에서만 5건이 깨졌으며
+    원인 셋 다 macOS에서는 구조적으로 드러날 수 없었다.
+
+    | 결함 | 왜 macOS에서 안 보였나 |
+    |---|---|
+    | `release()`가 Linux에서만 비동기인데 인터페이스는 동기였다 → 해제 직후 재획득이 **자기 헬퍼와 경합**해 `E_BOOTSTRAP_BUSY` | BSD는 `closeSync`라 해제가 실제로 즉시다 |
+    | 잠금 파일 권한 `0644` | `flock(1)`이 umask로 파일을 만든다. BSD는 `open(2)`에 모드를 넘긴다 |
+    | 헬퍼 stderr가 오류 메시지에서 누락 | `exit`가 stderr 읽기보다 먼저 발생. macOS에서는 우연히 순서가 맞았다 |
+
+    셋 다 스텁 `flock`으로는 잡을 수 없다. 커널과 실제 바이너리가 있어야만 나타난다.
+  - **회귀 방지**: 사람이 기억해서 한 번 돌리는 방식이 아니라 커밋마다 자동으로 지켜진다.
+    `lock*.test.ts`는 CI에서 별도 스텝(`Advisory lock`)으로 노출된다.
 
 ## 13. 참고
 
