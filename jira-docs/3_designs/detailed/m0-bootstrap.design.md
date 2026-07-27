@@ -50,6 +50,8 @@ localjira init \
 
 - 성공 또는 이미 같은 상태면 exit 0이다.
 - 기본 동작은 network에 쓰지 않는다. `--push`를 준 경우만 push한다.
+- `--push`를 줬지만 지정 remote가 없으면 로컬 변경 전에 `E_REMOTE_NOT_CONFIGURED`로 실패한다.
+  `--push`가 없고 remote도 없으면 local-only 초기화를 정상 진행한다.
 - remote가 존재하면 `refs/heads/localjira/data`만 fetch해 기존 공유 보드 유무를 확인한다.
 - secret·비밀번호·PAT는 인자로 받지 않는다. admin 자격증명은 M1 R12a가 담당한다.
 - 사람이 읽는 출력과 별도로 `--json`을 지원한다. JSON에는 `status`, `repo_root`, `board_path`,
@@ -321,6 +323,7 @@ orphan 판정은 “parent가 0개”만 보지 않는다. 이후 commit에는 p
 | `E_BRANCH_CHECKED_OUT` | 데이터 branch가 다른 path에 checkout | 없음 |
 | `E_WRONG_WORKTREE_BRANCH` | `.localjira`가 다른 branch를 가리킴 | 없음 |
 | `E_DATA_BRANCH_DIVERGED` | local/remote 데이터 branch 분기 | fetch만 가능 |
+| `E_REMOTE_NOT_CONFIGURED` | `--push`를 요청했지만 remote가 없음 | 없음 |
 | `E_PROJECT_MISMATCH` | 기존 프로젝트와 입력이 다름 | 없음 |
 | `E_PROJECT_NOT_FOUND` | 기존 보드에 요청 프로젝트 없음 | 없음 |
 | `E_PARTIAL_BOOTSTRAP` | 중간 실패를 안전하게 완전 rollback할 수 없음 | 진단에 명시 |
