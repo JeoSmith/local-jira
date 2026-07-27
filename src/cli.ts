@@ -14,6 +14,7 @@ import {
   BootstrapBusyError,
   BootstrapLockUnsupportedError,
 } from "./bootstrap/lock.ts";
+import { createIssue, IssueError } from "./domain/issue.ts";
 import {
   findIssue,
   indexStatus,
@@ -34,6 +35,9 @@ const USAGE = `Usage:
   localjira index rebuild [--json]
   localjira issue list [--project <KEY>] [--status <STATUS>] [--limit <N>] [--json]
   localjira issue show <KEY> [--json]
+  localjira issue create --project <KEY> --type <TYPE> --title <TITLE>
+                 [--description <TEXT>] [--points <N>] [--assignee <ID>]
+                 [--label <NAME>]... [--acceptance <TEXT>]... [--json]
 `;
 
 const [command, ...argv] = process.argv.slice(2);
@@ -175,6 +179,59 @@ function runIssueCommand(args: string[]): void {
     return;
   }
 
+  if (sub === "create") {
+    const options = parseArgs(
+      rest,
+      new Set([
+        "--project", "--type", "--title", "--description",
+        "--points", "--assignee", "--label", "--acceptance",
+      ]),
+      new Set(["--json"]),
+    );
+
+    const missing = ["--project", "--type", "--title"].filter(
+      (name) => !options.values.has(name),
+    );
+    if (missing.length > 0) {
+      process.stderr.write(`Missing required arguments: ${missing.join(", ")}\n${USAGE}`);
+      process.exitCode = 2;
+      return;
+    }
+
+    const board = openBoard(process.cwd());
+    try {
+      const issue = createIssue(
+        board,
+        {
+          project: options.values.get("--project") ?? "",
+          type: options.values.get("--type") ?? "",
+          title: options.values.get("--title") ?? "",
+          description: options.values.get("--description"),
+          points: options.values.has("--points")
+            ? Number(options.values.get("--points"))
+            : null,
+          assignee: options.values.get("--assignee") ?? null,
+          labels: options.repeated.get("--label") ?? [],
+          acceptance: (options.repeated.get("--acceptance") ?? []).map((text) => ({ text })),
+        },
+        // Until r12a lands there is no session; the actor is recorded as the
+        // local human so the file never claims an agent wrote it.
+        { id: "local", kind: "human" },
+      );
+
+      if (options.flags.has("--json")) {
+        write(JSON.stringify(issue, null, 2));
+      } else {
+        write(`Created ${issue.key}`);
+        write("");
+        printIssueDetail(issue);
+      }
+    } finally {
+      board.close();
+    }
+    return;
+  }
+
   if (sub === "show") {
     const [key, ...flags] = rest;
     if (!key || key.startsWith("--")) {
@@ -307,6 +364,8 @@ function pad(value: string, width: number): string {
 
 interface ParsedArgs {
   values: Map<string, string>;
+  /** Options given more than once, in the order they appeared. */
+  repeated: Map<string, string[]>;
   flags: Set<string>;
 }
 
@@ -315,7 +374,7 @@ function parseArgs(
   valued: Set<string>,
   flags: Set<string>,
 ): ParsedArgs {
-  const parsed: ParsedArgs = { values: new Map(), flags: new Set() };
+  const parsed: ParsedArgs = { values: new Map(), repeated: new Map(), flags: new Set() };
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -333,12 +392,14 @@ function parseArgs(
         );
       }
       parsed.values.set(arg, value);
+      append(parsed, arg, value);
       index += 1;
       continue;
     }
     const [name, inlineValue] = splitInline(arg);
     if (inlineValue !== null && valued.has(name)) {
       parsed.values.set(name, inlineValue);
+      append(parsed, name, inlineValue);
       continue;
     }
     throw new BootstrapInputError(
@@ -349,6 +410,15 @@ function parseArgs(
   }
 
   return parsed;
+}
+
+function append(parsed: ParsedArgs, name: string, value: string): void {
+  const existing = parsed.repeated.get(name);
+  if (existing) {
+    existing.push(value);
+  } else {
+    parsed.repeated.set(name, [value]);
+  }
 }
 
 function splitInline(arg: string): [string, string | null] {
@@ -432,6 +502,9 @@ function describeFailure(error: unknown): {
   }
   if (error instanceof BootstrapInputError) {
     return { code: error.code, message: error.message, recovery: null };
+  }
+  if (error instanceof IssueError) {
+    return { code: error.code, message: error.message, recovery: error.detail };
   }
   return {
     code: "E_UNEXPECTED",
