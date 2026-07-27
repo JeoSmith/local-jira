@@ -16,6 +16,16 @@ import {
 } from "./bootstrap/lock.ts";
 import { createIssue, IssueError } from "./domain/issue.ts";
 import {
+  bootstrapAdmin,
+  createUser,
+  listUsers,
+  needsBootstrap,
+  UserError,
+  type Role,
+} from "./domain/users.ts";
+import { PasswordError } from "./auth/password.ts";
+import { startServer } from "./server/http.ts";
+import {
   findIssue,
   indexStatus,
   listIssues,
@@ -38,6 +48,10 @@ const USAGE = `Usage:
   localjira issue create --project <KEY> --type <TYPE> --title <TITLE>
                  [--description <TEXT>] [--points <N>] [--assignee <ID>]
                  [--label <NAME>]... [--acceptance <TEXT>]... [--json]
+
+  localjira admin create --id <ID> --name <NAME> --password <PW> [--role <ROLE>] [--json]
+  localjira user list [--json]
+  localjira serve [--port <N>] [--host <ADDR>]
 `;
 
 const [command, ...argv] = process.argv.slice(2);
@@ -58,6 +72,15 @@ try {
       break;
     case "issue":
       runIssueCommand(argv);
+      break;
+    case "admin":
+      runAdminCommand(argv);
+      break;
+    case "user":
+      runUserCommand(argv);
+      break;
+    case "serve":
+      await runServeCommand(argv);
       break;
     default:
       process.stderr.write(USAGE);
@@ -270,6 +293,97 @@ function runIssueCommand(args: string[]): void {
 
   process.stderr.write(USAGE);
   process.exitCode = 2;
+}
+
+function runAdminCommand(args: string[]): void {
+  const [sub, ...rest] = args;
+  if (sub !== "create") {
+    process.stderr.write(USAGE);
+    process.exitCode = 2;
+    return;
+  }
+
+  const options = parseArgs(
+    rest,
+    new Set(["--id", "--name", "--password", "--role"]),
+    new Set(["--json"]),
+  );
+  const missing = ["--id", "--name", "--password"].filter((name) => !options.values.has(name));
+  if (missing.length > 0) {
+    process.stderr.write(`Missing required arguments: ${missing.join(", ")}\n${USAGE}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const board = openBoard(process.cwd());
+  try {
+    const first = needsBootstrap(board);
+    const input = {
+      id: options.values.get("--id") ?? "",
+      displayName: options.values.get("--name") ?? "",
+      password: options.values.get("--password") ?? "",
+    };
+    const user = first
+      ? bootstrapAdmin(board, input)
+      : createUser(board, { ...input, role: (options.values.get("--role") ?? "member") as Role });
+
+    if (options.flags.has("--json")) {
+      write(JSON.stringify({ user, bootstrapped: first }, null, 2));
+    } else {
+      write(`${first ? "Bootstrapped admin" : "Created user"} ${user.id} (${user.role})`);
+      write("");
+      write("  Identity is in users.yaml and is shared through git.");
+      write("  The password hash is in .local/credentials.sqlite and never leaves this machine.");
+    }
+  } finally {
+    board.close();
+  }
+}
+
+function runUserCommand(args: string[]): void {
+  const [sub, ...rest] = args;
+  if (sub !== "list") {
+    process.stderr.write(USAGE);
+    process.exitCode = 2;
+    return;
+  }
+
+  const options = parseArgs(rest, new Set(), new Set(["--json"]));
+  const board = openBoard(process.cwd());
+  try {
+    const users = listUsers(board);
+    if (options.flags.has("--json")) {
+      write(JSON.stringify(users, null, 2));
+      return;
+    }
+    if (users.length === 0) {
+      write("No accounts yet. Create the first admin with: localjira admin create");
+      return;
+    }
+    for (const user of users) {
+      write(`${user.id.padEnd(16)} ${user.role.padEnd(8)} ${user.displayName}`);
+    }
+  } finally {
+    board.close();
+  }
+}
+
+async function runServeCommand(args: string[]): Promise<void> {
+  const options = parseArgs(args, new Set(["--port", "--host"]), new Set());
+  const server = await startServer({
+    cwd: process.cwd(),
+    port: options.values.has("--port") ? Number(options.values.get("--port")) : 4000,
+    host: options.values.get("--host"),
+  });
+
+  write(`Local Jira listening on ${server.url}`);
+  write("Press Ctrl+C to stop.");
+
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.on(signal, () => {
+      void server.close().then(() => process.exit(0));
+    });
+  }
 }
 
 function printIndexStatus(status: IndexStatus): void {
@@ -505,6 +619,12 @@ function describeFailure(error: unknown): {
   }
   if (error instanceof IssueError) {
     return { code: error.code, message: error.message, recovery: error.detail };
+  }
+  if (error instanceof UserError) {
+    return { code: error.code, message: error.message, recovery: error.detail };
+  }
+  if (error instanceof PasswordError) {
+    return { code: error.code, message: error.message, recovery: null };
   }
   return {
     code: "E_UNEXPECTED",
