@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Linux and macOS take different advisory-lock paths, so a failure on one
+      # says nothing about the other. Never cancel the sibling job.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Type stripping runs .ts directly; the project has no dependencies,
+          # so there is nothing to install and nothing to cache.
+          node-version: '24'
+
+      - name: Record platform facts
+        run: |
+          node -e "console.log('platform:', process.platform, '| node:', process.version)"
+          git --version
+          if command -v flock >/dev/null 2>&1; then
+            echo "flock(1): $(command -v flock)"
+          else
+            echo "flock(1): absent (expected on macOS, which uses O_EXLOCK)"
+          fi
+
+      - name: Configure git identity
+        # The tests set identity per temporary repository, but a global fallback
+        # keeps any future code path from failing only on CI.
+        run: |
+          git config --global user.email "ci@example.invalid"
+          git config --global user.name "Local Jira CI"
+          git config --global init.defaultBranch main
+
+      - name: Advisory lock
+        # Called out as its own step so the Linux verification that OQ-M0-2 asks
+        # for is visible in the run summary instead of buried in the full suite.
+        run: npm run test:lock
+
+      - name: Full suite
+        run: npm test
+
+      - name: Bootstrap smoke test
+        # Exercises the CLI end to end, not just the library the tests import.
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)/demo"
+          mkdir -p "$work"
+          cd "$work"
+          git init -q --initial-branch=main
+          echo "# demo" > README.md
+          git add -A
+          git commit -qm "initial"
+
+          node "$GITHUB_WORKSPACE/src/cli.ts" init \
+            --project-key LJ --project-name "Local Jira" --timezone Asia/Seoul
+
+          test "$(git -C .localjira rev-parse --abbrev-ref HEAD)" = "localjira/data"
+          test -f .localjira/config.yaml
+          test -f .localjira/projects/LJ.yaml
+          test -f .localjira/.local/node.yaml
+          # Exactly one structural commit, unrelated to the code history.
+          test "$(git rev-list --count localjira/data)" = "1"
+          ! git merge-base main localjira/data 2>/dev/null
+
+          node "$GITHUB_WORKSPACE/src/cli.ts" doctor | tee doctor.out
+          grep -q "READY" doctor.out
+
+          # Re-running must change nothing.
+          before="$(git rev-parse localjira/data)"
+          node "$GITHUB_WORKSPACE/src/cli.ts" init \
+            --project-key LJ --project-name "Local Jira" --timezone Asia/Seoul
+          test "$(git rev-parse localjira/data)" = "$before"
