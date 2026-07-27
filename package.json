@@ -1,0 +1,17 @@
+{
+  "name": "local-jira",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "localjira": "./src/cli.ts"
+  },
+  "scripts": {
+    "doctor": "node src/cli.ts doctor",
+    "test": "node --test test/**/*.test.ts",
+    "check": "node --test test/**/*.test.ts"
+  }
+}
