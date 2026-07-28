@@ -19,6 +19,7 @@ export type UserErrorCode =
   | "E_INVALID_DISPLAY_NAME"
   | "E_INVALID_ROLE"
   | "E_USER_EXISTS"
+  | "E_LAST_ADMIN"
   | "E_ALREADY_BOOTSTRAPPED";
 
 export class UserError extends Error {
@@ -51,11 +52,68 @@ export function listUsers(board: BoardHandle): UserRecord[] {
     board.db
       .prepare("SELECT id, display_name, role FROM users ORDER BY id")
       .all() as Array<{ id: string; display_name: string | null; role: string | null }>
-  ).map((row) => ({
-    id: row.id,
-    displayName: row.display_name ?? row.id,
-    role: (row.role ?? "member") as Role,
-  }));
+  )
+    // A row with a role outside the fixed three is not loaded. Guessing a
+    // default would silently grant or withhold permission based on a typo.
+    .filter((row) => (ROLES as readonly string[]).includes(row.role ?? ""))
+    .map((row) => ({
+      id: row.id,
+      displayName: row.display_name ?? row.id,
+      role: row.role as Role,
+    }));
+}
+
+/** Accounts whose `role` the board refused to load. */
+export function invalidUsers(board: BoardHandle): Array<{ id: string; role: string | null }> {
+  return (
+    board.db
+      .prepare("SELECT id, role FROM users ORDER BY id")
+      .all() as Array<{ id: string; role: string | null }>
+  )
+    .filter((row) => !(ROLES as readonly string[]).includes(row.role ?? ""))
+    // node:sqlite hands back null-prototype rows; returning them from a public
+    // function makes every caller's deepEqual and spread behave oddly.
+    .map((row) => ({ id: row.id, role: row.role ?? null }));
+}
+
+/**
+ * Changes a role in place.
+ *
+ * The last admin cannot be demoted. A board with no admin can never regain
+ * one through the API, so the only recovery would be editing files by hand —
+ * a state the product should not be able to enter on its own.
+ */
+export function changeRole(
+  board: BoardHandle,
+  userId: string,
+  role: Role,
+): { from: Role; to: Role } {
+  const users = listUsers(board);
+  const user = users.find((candidate) => candidate.id === userId);
+  if (!user) {
+    throw new UserError("E_USER_EXISTS", `No user "${userId}"`);
+  }
+  requireRole(role);
+
+  if (user.role === "admin" && role !== "admin" && countAdmins(users) === 1) {
+    throw new UserError(
+      "E_LAST_ADMIN",
+      "This is the only admin; demoting it would leave the board without one.",
+      "Promote another account first.",
+    );
+  }
+
+  const next = users.map((candidate) =>
+    candidate.id === userId ? { ...candidate, role } : candidate,
+  );
+  writeUsersFile(board.boardRoot, next);
+  incrementalSync(board.boardRoot, board.db);
+
+  return { from: user.role, to: role };
+}
+
+function countAdmins(users: UserRecord[]): number {
+  return users.filter((user) => user.role === "admin").length;
 }
 
 /** True while the board has no accounts and every domain call must be 401. */
@@ -155,27 +213,29 @@ function appendUserToFile(boardRoot: string, user: UserRecord): void {
   const target = path.join(boardRoot, USERS_FILE);
   const existing = fs.existsSync(target)
     ? (parseYamlResource(fs.readFileSync(target)).frontmatter as Record<string, unknown>)
-    : { schema_version: 1, users: [] };
+    : { users: [] };
 
-  const entries = Array.isArray(existing.users) ? existing.users : [];
-  const lines = [`schema_version: ${existing.schema_version ?? 1}`];
+  const entries = (Array.isArray(existing.users) ? existing.users : []) as Array<
+    Record<string, unknown>
+  >;
+  writeUsersFile(boardRoot, [
+    ...entries.map((entry) => ({
+      id: String(entry.id ?? ""),
+      displayName: String(entry.display_name ?? ""),
+      role: String(entry.role ?? "member") as Role,
+    })),
+    user,
+  ]);
+}
 
-  if (entries.length === 0) {
-    lines.push("users:");
-  } else {
-    lines.push("users:");
+function writeUsersFile(boardRoot: string, users: UserRecord[]): void {
+  const lines = ["schema_version: 1", "users:"];
+  for (const user of users) {
+    lines.push(`  - id: ${yamlScalar(user.id)}`);
+    lines.push(`    display_name: ${yamlScalar(user.displayName)}`);
+    lines.push(`    role: ${user.role}`);
   }
-
-  for (const entry of entries as Array<Record<string, unknown>>) {
-    lines.push(`  - id: ${yamlScalar(String(entry.id ?? ""))}`);
-    lines.push(`    display_name: ${yamlScalar(String(entry.display_name ?? ""))}`);
-    lines.push(`    role: ${yamlScalar(String(entry.role ?? "member"))}`);
-  }
-  lines.push(`  - id: ${yamlScalar(user.id)}`);
-  lines.push(`    display_name: ${yamlScalar(user.displayName)}`);
-  lines.push(`    role: ${user.role}`);
-
-  writeFileAtomic(target, `${lines.join("\n")}\n`);
+  writeFileAtomic(path.join(boardRoot, USERS_FILE), `${lines.join("\n")}\n`);
 }
 
 function requireUserId(value: string): string {

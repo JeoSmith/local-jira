@@ -167,9 +167,11 @@ export function indexStatus(board: BoardHandle): IndexStatus {
     counts[label] = Number((board.db.prepare(sql).get() as { c: number }).c);
   }
 
-  const errors = board.db
-    .prepare("SELECT path, reason, detail FROM index_errors ORDER BY path")
-    .all() as Array<{ path: string; reason: string; detail: string | null }>;
+  const errors = (
+    board.db
+      .prepare("SELECT path, reason, detail FROM index_errors ORDER BY path")
+      .all() as Array<{ path: string; reason: string; detail: string | null }>
+  ).map((row) => ({ path: row.path, reason: row.reason, detail: row.detail ?? null }));
 
   const rebuiltAt = getMeta(board.db, "last_full_rebuild_at");
 

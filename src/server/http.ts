@@ -1,6 +1,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
+import { AuthorizationError, require as requireCapability, type Capability } from "../auth/authorize.ts";
 import { CredentialStore } from "../auth/credentials.ts";
 import { createIssue, IssueError } from "../domain/issue.ts";
 import {
@@ -14,9 +15,12 @@ import {
 } from "../domain/update.ts";
 import {
   authenticate,
+  changeRole,
+  createUser,
   listUsers,
   needsBootstrap,
   UserError,
+  type Role,
   type UserRecord,
 } from "../domain/users.ts";
 import { canonicalJson, type JsonValue } from "../storage/jcs.ts";
@@ -130,35 +134,57 @@ async function handle(
   if (route === "GET /me") {
     return respondJson(response, 200, { user });
   }
+  if (route === "GET /users") {
+    return respondJson(response, 200, { users: listUsers(context.board) });
+  }
+  if (route === "POST /users") {
+    return createUserRoute(request, response, authed);
+  }
+  if (request.method === "PUT" && /^\/users\/[^/]+\/role$/.test(url.pathname)) {
+    return changeRoleRoute(
+      decodeURIComponent(url.pathname.slice("/users/".length, -"/role".length)),
+      request,
+      response,
+      authed,
+    );
+  }
   if (route === "GET /issues") {
     return listIssuesRoute(url, response, authed);
   }
   if (route === "POST /issues") {
-    return createIssueRoute(request, response, authed);
+    return guard(response, authed, "issue:write", () =>
+      createIssueRoute(request, response, authed),
+    );
   }
   if (request.method === "POST" && url.pathname.endsWith("/transitions")) {
     const key = decodeURIComponent(
       url.pathname.slice("/issues/".length, -"/transitions".length),
     );
-    return transitionRoute(key, request, response, authed);
+    return guard(response, authed, "issue:write", () =>
+      transitionRoute(key, request, response, authed),
+    );
   }
   if (request.method === "DELETE" && url.pathname.startsWith("/issues/")) {
-    return deleteRoute(
-      decodeURIComponent(url.pathname.slice("/issues/".length)),
-      request,
-      response,
-      authed,
+    return guard(response, authed, "issue:delete", () =>
+      deleteRoute(
+        decodeURIComponent(url.pathname.slice("/issues/".length)),
+        request,
+        response,
+        authed,
+      ),
     );
   }
   if (
     (request.method === "PUT" || request.method === "PATCH") &&
     url.pathname.startsWith("/issues/")
   ) {
-    return updateIssueRoute(
-      decodeURIComponent(url.pathname.slice("/issues/".length)),
-      request,
-      response,
-      authed,
+    return guard(response, authed, "issue:write", () =>
+      updateIssueRoute(
+        decodeURIComponent(url.pathname.slice("/issues/".length)),
+        request,
+        response,
+        authed,
+      ),
     );
   }
   if (request.method === "GET" && url.pathname.startsWith("/issues/")) {
@@ -341,6 +367,79 @@ async function deleteRoute(
   } catch (error) {
     return handleWriteError(error, response);
   }
+}
+
+/**
+ * Checks a capability before running the route.
+ *
+ * Authorisation sits in front of the handler rather than inside it so that a
+ * new route cannot quietly ship without a check — forgetting `guard` is
+ * visible at the routing table, while forgetting a call buried in a handler
+ * is not.
+ */
+async function guard(
+  response: http.ServerResponse,
+  context: RequestContext,
+  capability: Capability,
+  body: () => Promise<void> | void,
+): Promise<void> {
+  try {
+    requireCapability(context.user!.role, capability);
+  } catch (error) {
+    if (error instanceof AuthorizationError) {
+      // 403, not 401: the caller is known, and repeating the request with the
+      // same identity will never succeed.
+      return respondError(response, 403, error.code, error.message, `Required: ${capability}`);
+    }
+    throw error;
+  }
+  await body();
+}
+
+async function createUserRoute(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  return guard(response, context, "user:manage", async () => {
+    const body = await readJson(request);
+    try {
+      const user = createUser(context.board, {
+        id: String(body.id ?? ""),
+        displayName: String(body.display_name ?? body.displayName ?? ""),
+        role: String(body.role ?? "member") as Role,
+        password: String(body.password ?? ""),
+      });
+      respondJson(response, 201, { user });
+    } catch (error) {
+      return respondUserError(error, response);
+    }
+  });
+}
+
+async function changeRoleRoute(
+  userId: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  return guard(response, context, "user:manage", async () => {
+    const body = await readJson(request);
+    try {
+      const change = changeRole(context.board, userId, String(body.role ?? "") as Role);
+      respondJson(response, 200, { user: userId, from: change.from, to: change.to });
+    } catch (error) {
+      return respondUserError(error, response);
+    }
+  });
+}
+
+function respondUserError(error: unknown, response: http.ServerResponse): void {
+  if (error instanceof UserError) {
+    const status = error.code === "E_LAST_ADMIN" ? 409 : 400;
+    return respondError(response, status, error.code, error.message, error.detail);
+  }
+  throw error;
 }
 
 function actorOf(context: RequestContext): { id: string; kind: "human" | "agent" } {
