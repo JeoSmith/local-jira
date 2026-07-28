@@ -261,7 +261,7 @@ test("a no-op update changes nothing at all", async (t) => {
   );
 });
 
-test("ignores a rev field entirely", async (t) => {
+test("takes a hand-edited rev as the base to count on from", async (t) => {
   const sandbox = await makeSandbox(t);
   const session = await signIn(sandbox);
   const { key } = await createIssue(session);
@@ -270,7 +270,7 @@ test("ignores a rev field entirely", async (t) => {
   // Two clones can produce the same rev, so it must not participate in the
   // decision — it rides along as display data only (ADR-003).
   const file = path.join(sandbox.board, "issues", "LJ", `${key}.md`);
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("status: BACKLOG", "status: BACKLOG\nrev: 7"));
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/^rev: \d+$/m, "rev: 7"));
 
   const reopened = await signIn(sandbox);
   t.after(() => reopened.server.close());
@@ -282,8 +282,12 @@ test("ignores a rev field entirely", async (t) => {
     ifMatch: read.etag ?? "",
     body: { title: "rev는 판정에 쓰이지 않는다" },
   });
-  assert.equal(updated.status, 200);
-  assert.equal((updated.json as unknown as Record<string, unknown>).rev, 7, "and preserved");
+  assert.equal(updated.status, 200, "an unexpected rev never blocks a valid ETag");
+  assert.equal(
+    (updated.json as unknown as Record<string, unknown>).rev,
+    8,
+    "the counter continues from what the file held rather than resetting",
+  );
 });
 
 test("preserves unknown keys and body through an update", async (t) => {
@@ -326,4 +330,129 @@ test("refuses a status change through the field update route", async (t) => {
   // S1-D2 keeps transitions on their own endpoint so gating lives in one place.
   assert.equal(rejected.status, 400);
   assert.equal(rejected.json.error.code as unknown as string, "E_STATUS_NOT_ALLOWED");
+});
+
+test("rev is carried for display but never decides concurrency", async (t) => {
+  const sandbox = await makeSandbox(t);
+  const session = await signIn(sandbox);
+  t.after(() => session.server.close());
+
+  const { key } = await createIssue(session);
+  const first = await call(session, "GET", `/issues/${key}`);
+  assert.equal(first.json.rev as unknown as number, 1, "a new issue starts at rev 1");
+
+  const bumped = await call(session, "PUT", `/issues/${key}`, {
+    ifMatch: first.etag ?? "",
+    body: { points: 8 },
+  });
+  assert.equal(bumped.status, 200);
+  assert.equal(bumped.json.rev as unknown as number, 2, "a change advances the counter");
+
+  // The decisive part: a request whose rev matches the server's is still
+  // refused when its ETag is stale. If rev were consulted this would pass, and
+  // two clones that both went 1 → 2 offline would silently overwrite one
+  // another on merge.
+  const stale = await call(session, "PUT", `/issues/${key}`, {
+    ifMatch: first.etag ?? "",
+    body: { points: 13, rev: 2 },
+  });
+  assert.equal(stale.status, 400, "rev is server-owned and cannot be supplied");
+  assert.equal(
+    (stale.json as unknown as { error: { code: string } }).error.code,
+    "E_IMMUTABLE_FIELD",
+  );
+
+  const withoutRev = await call(session, "PUT", `/issues/${key}`, {
+    ifMatch: first.etag ?? "",
+    body: { points: 13 },
+  });
+  assert.equal(withoutRev.status, 412, "the ETag alone decides, and it is stale");
+
+  const unchanged = await call(session, "GET", `/issues/${key}`);
+  assert.equal(unchanged.json.points as unknown as number, 8);
+  assert.equal(unchanged.json.rev as unknown as number, 2, "a refused write does not advance rev");
+});
+
+test("a change stamps updated_at and the actor that made it", async (t) => {
+  const sandbox = await makeSandbox(t);
+  const session = await signIn(sandbox);
+  t.after(() => session.server.close());
+
+  const { key } = await createIssue(session);
+  const before = await call(session, "GET", `/issues/${key}`);
+  const createdAt = before.json.created_at as unknown as string;
+  assert.equal(before.json.updated_at as unknown as string, createdAt);
+
+  // The stamp has one-second resolution, so a same-second edit would be
+  // indistinguishable from no edit at all.
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+
+  const updated = await call(session, "PUT", `/issues/${key}`, {
+    ifMatch: before.etag ?? "",
+    body: { title: "제목 변경" },
+  });
+  assert.equal(updated.status, 200);
+  assert.ok(
+    (updated.json.updated_at as unknown as string) > createdAt,
+    "updated_at must move forward on a change",
+  );
+  assert.equal(updated.json.created_at as unknown as string, createdAt, "created_at is fixed");
+  assert.equal(updated.json.last_actor_kind as unknown as string, "human");
+
+  // A no-op must not move it: the ETag follows updated_at, and a moving ETag
+  // would manufacture conflicts for clients that changed nothing.
+  const noop = await call(session, "PUT", `/issues/${key}`, {
+    ifMatch: updated.etag ?? "",
+    body: { title: "제목 변경" },
+  });
+  assert.equal(noop.status, 200);
+  assert.equal(noop.etag, updated.etag);
+  assert.equal(noop.json.updated_at as unknown as string, updated.json.updated_at);
+  assert.equal(noop.json.rev as unknown as number, updated.json.rev);
+});
+
+test("acceptance criteria can be edited after creation", async (t) => {
+  const sandbox = await makeSandbox(t);
+  const session = await signIn(sandbox);
+  t.after(() => session.server.close());
+
+  const created = await call(session, "POST", "/issues", {
+    body: {
+      project: "LJ", type: "story", title: "인수조건 수정",
+      acceptance: [{ text: "첫 번째" }],
+    },
+  });
+  assert.equal(created.status, 201);
+  const key = created.json.key as unknown as string;
+
+  const edited = await call(session, "PUT", `/issues/${key}`, {
+    ifMatch: created.etag ?? "",
+    body: {
+      acceptance: [
+        { text: "첫 번째", done: true },
+        { text: "두 번째" },
+      ],
+    },
+  });
+  assert.equal(edited.status, 200);
+  assert.deepEqual(edited.json.acceptance, [
+    { done: true, id: "ac1", text: "첫 번째" },
+    { done: false, id: "ac2", text: "두 번째" },
+  ]);
+
+  // Re-sending the same list is a no-op even though the request omits the
+  // server-assigned ids.
+  const again = await call(session, "PUT", `/issues/${key}`, {
+    ifMatch: edited.etag ?? "",
+    body: { acceptance: [{ text: "첫 번째", done: true }, { text: "두 번째" }] },
+  });
+  assert.equal(again.status, 200);
+  assert.equal(again.etag, edited.etag, "an identical list must not rewrite the file");
+
+  const cleared = await call(session, "PUT", `/issues/${key}`, {
+    ifMatch: edited.etag ?? "",
+    body: { acceptance: [] },
+  });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.json.acceptance, undefined, "an empty list drops the key entirely");
 });

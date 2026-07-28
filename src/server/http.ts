@@ -402,6 +402,16 @@ async function updateIssueRoute(
         points: body.points === undefined ? undefined : body.points === null ? null : Number(body.points),
         labels: Array.isArray(body.labels) ? body.labels.map(String) : undefined,
         assignee: body.assignee === undefined ? undefined : (body.assignee as string | null),
+        acceptance: Array.isArray(body.acceptance)
+          ? body.acceptance.map((item) =>
+              typeof item === "string"
+                ? { text: item }
+                : {
+                    text: String((item as Record<string, unknown>)?.text ?? ""),
+                    done: (item as Record<string, unknown>)?.done === true,
+                  },
+            )
+          : undefined,
         description: typeof body.description === "string" ? body.description : undefined,
         status: typeof body.status === "string" ? body.status : undefined,
       },

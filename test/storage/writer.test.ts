@@ -128,22 +128,71 @@ test("serialises concurrent writes to the same path", async (t) => {
   const render = (title: string): string =>
     `---\nuid: 01JCONC${"0".repeat(19)}\nkey: LJ-1\ntype: task\ntitle: ${title}\nstatus: BACKLOG\n---\n\n`;
 
-  // Both are issued before either resolves, so they overlap in flight.
-  const first = board.writer.write({
-    kind: "create", targetPath: target, contents: render("first"),
+  await board.writer.write({
+    kind: "create", targetPath: target, contents: render("base"),
     expectedHash: null, actorId: "u", actorKind: "human",
   });
-  const second = first.then(() =>
-    board.writer.write({
-      kind: "update", targetPath: target, contents: render("second"),
-      expectedHash: fileHash(Buffer.from(render("first"), "utf8")),
-      actorId: "u", actorKind: "human",
-    }),
+  const base = fileHash(Buffer.from(render("base"), "utf8"));
+
+  // Five updates from the same read, all issued before any of them resolves.
+  // This is the race the mutex exists for: nothing here awaits anything else,
+  // so without serialisation they interleave on one file.
+  const names = ["a", "b", "c", "d", "e"];
+  const settled = await Promise.allSettled(
+    names.map((name) =>
+      board.writer.write({
+        kind: "update", targetPath: target, contents: render(name),
+        expectedHash: base, actorId: "u", actorKind: "human",
+      }),
+    ),
   );
-  await Promise.all([first, second]);
+
+  const winners = settled.filter((result) => result.status === "fulfilled");
+  assert.equal(winners.length, 1, "only one write may win from a shared base");
+
+  for (const loser of settled.filter((result) => result.status !== "fulfilled")) {
+    // A lost update has to be refused. Silently applying it is the failure this
+    // whole mechanism exists to prevent.
+    assert.ok(
+      (loser as PromiseRejectedResult).reason instanceof WriteConflictError,
+      `expected a conflict, got ${String((loser as PromiseRejectedResult).reason)}`,
+    );
+  }
+
+  // The survivor is one complete document, not a blend of five writers.
+  const parsed = parseMarkdownResource(fs.readFileSync(path.join(sandbox.board, target)));
+  assert.ok(
+    names.includes((parsed.frontmatter as Record<string, unknown>).title as string),
+    "the file must hold exactly one writer's content",
+  );
+});
+
+test("a writer that re-reads after each write loses nothing", async (t) => {
+  const sandbox = makeSandbox(t);
+  const board = await sandbox.open();
+  t.after(() => board.close());
+
+  const target = "issues/LJ/LJ-2.md";
+  const render = (title: string): string =>
+    `---\nuid: 01JSEQ0${"0".repeat(19)}\nkey: LJ-2\ntype: task\ntitle: ${title}\nstatus: BACKLOG\n---\n\n`;
+
+  await board.writer.write({
+    kind: "create", targetPath: target, contents: render("v0"),
+    expectedHash: null, actorId: "u", actorKind: "human",
+  });
+
+  // The other half of the acceptance criterion: given a fresh precondition each
+  // time, every write lands rather than being rejected as a conflict.
+  for (let version = 1; version <= 5; version += 1) {
+    await board.writer.write({
+      kind: "update", targetPath: target, contents: render(`v${version}`),
+      expectedHash: fileHash(Buffer.from(render(`v${version - 1}`), "utf8")),
+      actorId: "u", actorKind: "human",
+    });
+  }
 
   const parsed = parseMarkdownResource(fs.readFileSync(path.join(sandbox.board, target)));
-  assert.equal((parsed.frontmatter as Record<string, unknown>).title, "second");
+  assert.equal((parsed.frontmatter as Record<string, unknown>).title, "v5");
 });
 
 test("refuses a write whose expected hash no longer matches", async (t) => {

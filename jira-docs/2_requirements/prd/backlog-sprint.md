@@ -180,8 +180,10 @@ links:
 acceptance:                          # ★ 구조화 필드는 frontmatter에
   - {id: ac1, text: "5,000건 스크롤 시 프레임 드랍 없음", done: false}
 created_at: 2026-07-27T11:20:00+09:00
-updated_at: 2026-07-27T14:02:11+09:00
+updated_at: 2026-07-27T14:02:11+09:00   # 변경마다 갱신 (created_at과 같은 오프셋)
 created_by_kind: human
+last_actor_kind: agent               # 마지막으로 이 파일을 바꾼 주체
+rev: 3                               # 표시·이력용 카운터 — 동시성 판정에 쓰지 않는다(§5.4)
 schema_version: 1
 ---
 

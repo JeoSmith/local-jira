@@ -261,6 +261,29 @@ interface RenderInput {
   description: string;
 }
 
+/**
+ * Renders the `acceptance:` block sequence.
+ *
+ * Shared by creation and update so a criterion edited later keeps the shape it
+ * was created with — ids stay dense and positional, and `done` is always
+ * spelled out rather than left to YAML's absent-means-false reading.
+ *
+ * Structured in frontmatter, never as a body heading: the body is free prose
+ * and the parser must not read meaning out of it.
+ */
+export function renderAcceptance(items: AcceptanceInput[]): string[] {
+  if (items.length === 0) {
+    return [];
+  }
+  const lines = ["acceptance:"];
+  items.forEach((item, index) => {
+    lines.push(`  - id: ac${index + 1}`);
+    lines.push(`    text: ${yamlScalar(item.text)}`);
+    lines.push(`    done: ${item.done === true}`);
+  });
+  return lines;
+}
+
 export function renderIssueFile(input: RenderInput): string {
   const lines: string[] = [
     `uid: ${input.uid}`,
@@ -280,27 +303,36 @@ export function renderIssueFile(input: RenderInput): string {
   if (input.labels.length > 0) {
     lines.push(`labels: [${input.labels.map(yamlScalar).join(", ")}]`);
   }
-  if (input.acceptance.length > 0) {
-    lines.push("acceptance:");
-    input.acceptance.forEach((item, index) => {
-      // Structured in frontmatter, never as a body heading: the body is free
-      // prose and the parser must not read meaning out of it.
-      lines.push(`  - id: ac${index + 1}`);
-      lines.push(`    text: ${yamlScalar(item.text)}`);
-      lines.push(`    done: ${item.done === true}`);
-    });
-  }
+  lines.push(...renderAcceptance(input.acceptance));
 
   lines.push(
     `created_at: ${input.createdAt}`,
     `updated_at: ${input.createdAt}`,
     `created_by_kind: ${input.createdByKind}`,
     `last_actor_kind: ${input.createdByKind}`,
+    // Display and history only. The concurrency validator is the ETag, never
+    // this counter: two clones editing offline both produce rev 2 from rev 1,
+    // so equal revs would read as "no change" and unequal ones as a conflict
+    // that isn't. Keeping it out of the decision is what makes it safe to show.
+    "rev: 1",
     `schema_version: ${SCHEMA_VERSION}`,
   );
 
   const body = input.description === "" ? "" : ensureTrailingNewline(input.description);
   return `---\n${lines.join("\n")}\n---\n${body}`;
+}
+
+/**
+ * The offset later writes must stamp with.
+ *
+ * A missing project falls back to UTC rather than throwing: the issue exists,
+ * so refusing to timestamp an edit to it would be worse than a plain `Z`.
+ */
+export function projectTimezone(board: BoardHandle, key: string): string | null {
+  const row = board.db
+    .prepare("SELECT timezone FROM projects WHERE key = ?")
+    .get(key) as { timezone: string | null } | undefined;
+  return row?.timezone ?? null;
 }
 
 /** RFC 3339 with the project's offset, so a local day boundary is readable. */

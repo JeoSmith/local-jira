@@ -6,7 +6,15 @@ import { yamlScalar } from "../bootstrap/scaffold.ts";
 import type { JsonValue } from "../storage/jcs.ts";
 import { findIssue, type IssueDetail, type WritableBoard } from "../storage/board.ts";
 import { fileHash, parseMarkdownResource } from "../storage/resource.ts";
-import { IssueError, MAX_POINTS, type Actor } from "./issue.ts";
+import {
+  IssueError,
+  MAX_POINTS,
+  projectTimezone,
+  renderAcceptance,
+  timestamp,
+  type AcceptanceInput,
+  type Actor,
+} from "./issue.ts";
 import { buildEvent } from "./events.ts";
 import {
   allowedTargets,
@@ -23,6 +31,7 @@ export const UPDATABLE = [
   "points",
   "labels",
   "assignee",
+  "acceptance",
   "description",
 ] as const;
 export type UpdatableField = (typeof UPDATABLE)[number];
@@ -32,6 +41,7 @@ export interface UpdateIssueInput {
   points?: number | null;
   labels?: string[];
   assignee?: string | null;
+  acceptance?: AcceptanceInput[];
   description?: string;
   /** Rejected if present — transitions have their own endpoint. */
   status?: string;
@@ -128,11 +138,14 @@ export async function updateIssue(
     return { issue, changed: false };
   }
 
-  const now = new Date().toISOString().slice(0, 19) + "Z";
+  // The project's offset, matching creation. A `Z` stamp against a `+09:00`
+  // created_at would compare as *earlier* on a string sort — the same
+  // mixed-spelling trap the event log already avoids.
+  const now = timestamp(projectTimezone(board, issue.project));
   await writable.writer.write({
     kind: "update",
     targetPath: issue.path,
-    contents: patched,
+    contents: touchMetadata(patched, now, actor.kind),
     expectedHash: hashOf(original),
     event: buildEvent(board.localDirectory, {
       verb: "issue.updated",
@@ -193,9 +206,74 @@ export function patchIssueFile(original: string, input: UpdateIssueInput): strin
       ? removeKey(lines, "labels")
       : setScalar(lines, "labels", `[${labels.map(yamlScalar).join(", ")}]`);
   }
+  if (input.acceptance !== undefined) {
+    lines = setBlock(lines, "acceptance", renderAcceptance(normaliseAcceptance(input.acceptance)));
+  }
 
   const body = input.description === undefined ? match[4] : ensureNewline(input.description);
   return `${match[1]}${lines.join("\n")}${match[3]}${body}`;
+}
+
+/**
+ * Stamps the fields the server owns after a change is known to be real.
+ *
+ * Separate from `patchIssueFile` on purpose: if this ran inside the field
+ * patch, every no-op request would move `updated_at` and `rev`, the ETag would
+ * follow, and a client polling with `If-Match` would see a conflict it did not
+ * cause. So the caller compares the field patch against the original first and
+ * only touches metadata once something actually differs.
+ */
+export function touchMetadata(
+  original: string,
+  at: string,
+  actorKind: Actor["kind"],
+): string {
+  const match = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n)([\s\S]*)$/.exec(original);
+  if (!match) {
+    throw new IssueError("E_INVALID_TITLE", "The issue file has no frontmatter");
+  }
+
+  let lines = match[2].split("\n");
+  lines = setScalar(lines, "updated_at", at);
+  lines = setScalar(lines, "last_actor_kind", actorKind);
+  lines = setScalar(lines, "rev", String(currentRev(lines) + 1));
+
+  return `${match[1]}${lines.join("\n")}${match[3]}${match[4]}`;
+}
+
+/** A malformed or missing counter restarts at 0; it is display-only either way. */
+function currentRev(lines: string[]): number {
+  const index = indexOfKey(lines, "rev");
+  if (index === -1) {
+    return 0;
+  }
+  const value = Number(lines[index].slice(lines[index].indexOf(":") + 1).trim());
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+/** Replaces a key and the block indented beneath it with pre-rendered lines. */
+function setBlock(lines: string[], key: string, block: string[]): string[] {
+  const stripped = removeKey(lines, key);
+  if (block.length === 0) {
+    return stripped;
+  }
+  const anchor = indexOfKey(stripped, "created_at");
+  return anchor === -1
+    ? [...stripped, ...block]
+    : [...stripped.slice(0, anchor), ...block, ...stripped.slice(anchor)];
+}
+
+function normaliseAcceptance(items: AcceptanceInput[]): AcceptanceInput[] {
+  return items.map((item) => {
+    const text = typeof item?.text === "string" ? item.text.trim() : "";
+    if (text === "") {
+      throw new IssueError(
+        "E_INVALID_TITLE",
+        "Each acceptance criterion needs a non-empty text",
+      );
+    }
+    return { text, done: item.done === true };
+  });
 }
 
 /** Replaces a top-level `key: value` line, or appends one if absent. */
@@ -248,11 +326,31 @@ function conflictsBetween(
       ? ensureNewline(String(requested))
       : requested) as JsonValue;
 
-    if (JSON.stringify(currentValue) !== JSON.stringify(requestedValue)) {
+    if (
+      JSON.stringify(comparable(field, currentValue)) !==
+      JSON.stringify(comparable(field, requestedValue))
+    ) {
       conflicts[key] = { current: currentValue, requested: requestedValue };
     }
   }
   return conflicts;
+}
+
+/**
+ * Reduces a value to the part a client controls.
+ *
+ * Only `acceptance` needs it: the stored criteria carry a server-assigned `id`
+ * that the request never sends back, so a literal comparison would report every
+ * acceptance list as conflicting with an identical one.
+ */
+function comparable(field: UpdatableField, value: JsonValue): JsonValue {
+  if (field !== "acceptance" || !Array.isArray(value)) {
+    return value;
+  }
+  return value.map((item) => {
+    const entry = (item ?? {}) as Record<string, JsonValue>;
+    return { text: entry.text ?? null, done: entry.done === true };
+  });
 }
 
 /** Accepts `"abc"` and bare `abc`; weak validators are refused outright. */
@@ -309,7 +407,17 @@ function hashOf(contents: string): string {
 // ── status transitions and deletion (r01b) ──────────────────────────────────
 
 /** Fields the server owns; a request that names one is rejected outright. */
-export const IMMUTABLE_FIELDS = ["uid", "key", "created_at", "created_by_kind"] as const;
+export const IMMUTABLE_FIELDS = [
+  "uid",
+  "key",
+  "created_at",
+  "created_by_kind",
+  // Stamped by `touchMetadata`. A client that could set these could backdate a
+  // change or freeze the revision counter it is also asking others to trust.
+  "updated_at",
+  "last_actor_kind",
+  "rev",
+] as const;
 
 export class TransitionError extends Error {
   readonly code: "E_TRANSITION_NOT_ALLOWED" | "E_TRANSITION_FORBIDDEN" | "E_INVALID_STATUS";
@@ -395,11 +503,11 @@ export async function transitionIssue(
   const original = fs.readFileSync(absolute, "utf8");
   const patched = patchStatus(original, from, input.to);
 
-  const now = new Date().toISOString().slice(0, 19) + "Z";
+  const now = timestamp(projectTimezone(board, issue.project));
   await writable.writer.write({
     kind: "update",
     targetPath: issue.path,
-    contents: patched,
+    contents: touchMetadata(patched, now, actor.kind),
     expectedHash: hashOf(original),
     event: buildEvent(board.localDirectory, {
       verb: "issue.transitioned",
@@ -477,7 +585,7 @@ export async function deleteIssue(
   }
 
   const absolute = path.join(board.boardRoot, issue.path);
-  const now = new Date().toISOString().slice(0, 19) + "Z";
+  const now = timestamp(projectTimezone(board, issue.project));
 
   await writable.writer.write({
     kind: "delete",
