@@ -6,10 +6,27 @@ scope_count: 16
 scope_points: 76
 carried_over: 4
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-28
 ---
 
 # Sprint 01 — M1 신뢰 가능한 코어
+
+## 진행 현황 (2026-07-28)
+
+| Wave | 스토리 | 점수 | 상태 |
+|---|---|---:|---|
+| **1** | r08a · r01a · r12a | 14 | ✅ **완료 — Gate 1 통과** |
+| 2 | r08b · r09 · r10 · r01b · r12b · r14a | 31 | ⬜ |
+| 3 | r08c · r02a · r02b · r03 · r14b | 20 | ⬜ |
+| 4 | r11a · r04a | 11 | ⬜ |
+
+**14 / 76점 (18%)** · 테스트 167건 통과 · CI는 ubuntu·macOS 양쪽 초록.
+
+Wave 1에서 나온 것 중 스토리에 없던 작업 둘:
+- **HTTP 서버** — r01a·r12a의 인수조건이 전제하는데 이를 다루는 스토리가 없었다(분해 누락).
+  r12a에 함께 세웠다. `POST /auth/login`·`/issues`·`GET /issues/{key}` 등.
+- **CLI 조회·생성 명령** — 보드를 눈으로 확인할 수단이 M2까지 없다는 문제 때문에 앞당겼다.
+  `index status`·`issue list|show|create`·`admin create`·`user list`·`serve`.
 
 ## 스프린트 목표
 
@@ -115,15 +132,23 @@ CI·Linux 결함 수정까지 한 세션에 끝났고, 이를 "며칠짜리"로 
 숫자는 우선순위가 아니라 **의존성 웨이브**다. 같은 웨이브의 항목은 병렬 진행할 수 있지만,
 다음 웨이브로 넘어갈 때 해당 게이트를 통과해야 한다.
 
-### Wave 1 — 세 축의 기반
+### Wave 1 — 세 축의 기반 ✅
 
-| 순서 | 스토리 | 결과 |
-|---|---|---|
-| 1.1 | [r08a](../../2_requirements/story/r08a-file-index-sync.md) | 파일 SoT 파서·SQLite 인덱스·무손실 전체 재빌드 |
-| 1.2 | [r01a](../../2_requirements/story/r01a-issue-create-read.md) | 이슈 생성·조회와 uid/표시 키 발급 |
-| 1.3 | [r12a](../../2_requirements/story/r12a-admin-bootstrap-login.md) | admin 부트스트랩·로컬 로그인 |
+| 순서 | 스토리 | 결과 | 상태 |
+|---|---|---|---|
+| 1.1 | [r08a](../../2_requirements/story/r08a-file-index-sync.md) | 파일 SoT 파서·SQLite 인덱스·무손실 전체 재빌드 | ✅ |
+| 1.2 | [r01a](../../2_requirements/story/r01a-issue-create-read.md) | 이슈 생성·조회와 uid/표시 키 발급 | ✅ |
+| 1.3 | [r12a](../../2_requirements/story/r12a-admin-bootstrap-login.md) | admin 부트스트랩·로컬 로그인 | ✅ |
 
-**Gate 1** — 인증된 admin이 이슈를 만들고, 인덱스를 삭제한 뒤 재기동해 같은 이슈를 조회한다.
+**Gate 1 통과** — 인증된 admin이 이슈를 만들고, 인덱스를 삭제한 뒤 재기동해 같은 이슈를 조회한다.
+`test/gate1.integration.test.ts`가 이 경로를 하나로 꿴다. 세 스토리가 각각 통과해도
+그 사이 이음매는 별개라서, 게이트는 통합 시나리오 1건으로만 닫는다.
+
+측정된 것:
+- 재빌드 후 **ETag가 바이트 단위로 동일** — 파생 인덱스가 표현을 바꾸지 않는다
+- 재빌드가 **도메인 파일을 한 바이트도 건드리지 않음**(`git status` 불변)
+- 워킹트리에 남는 것은 `users.yaml`과 이슈 파일 1개뿐 — 인덱스·자격증명은 `.local/`
+- 5,000건 전체 재빌드 **1.2s**(예산 10s), 무변경 재기동 시 hash **0회**
 
 ### Wave 2 — 안전한 쓰기와 주체
 
