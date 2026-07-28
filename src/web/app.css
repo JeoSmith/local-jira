@@ -103,3 +103,48 @@ form button:disabled { opacity: .55; cursor: wait; }
   .filters select { width: 100%; }
   .board { padding: 0 18px 30px; }
 }
+
+/* ── issue detail and activity timeline (r14b) ─────────────────────────── */
+.detail { position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 92vw); padding: 20px 22px 32px;
+  overflow-y: auto; border-left: 1px solid var(--line); background: #fbfcfb; box-shadow: -18px 0 48px rgba(35,55,42,.13); }
+.detail-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 18px; }
+.detail-head h2 { margin: 6px 0 0; font-size: 17px; }
+.detail-close { margin-left: auto; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 8px;
+  background: #fff; color: var(--muted); font-size: 17px; line-height: 1; cursor: pointer; }
+.detail-section { margin: 0 0 10px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.timeline { margin: 0; padding: 0; list-style: none; }
+.timeline li { padding: 11px 0 12px; border-top: 1px solid var(--line); }
+.timeline li:first-child { border-top: 0; }
+.entry-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.entry-verb { font-size: 13px; font-weight: 600; }
+.entry-at { margin-left: auto; color: var(--muted); font-size: 11px; }
+.entry-actor { color: var(--muted); font-size: 12px; }
+.entry-diff { margin: 7px 0 0; padding: 8px 10px; border-radius: 8px; background: #eef1ef;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+.entry-hint { margin: 6px 0 0; color: var(--muted); font-size: 11px; }
+.timeline-more { margin-top: 14px; width: 100%; padding: 9px; border: 1px solid var(--line); border-radius: 9px;
+  background: #fff; color: var(--muted); font-size: 12px; cursor: pointer; }
+
+/* The four actor kinds must not look alike: an agent's change reading as a
+   person's is the exact failure §8 names. Colour is doubled by a text label so
+   the distinction survives a colour-blind reader and a greyscale screenshot. */
+.kind { padding: 2px 7px; border-radius: 99px; font-size: 10px; font-weight: 700; letter-spacing: .04em; }
+.kind-human    { color: #1f4d33; background: #cfe9da; }
+.kind-agent    { color: #4a2d70; background: #e4d8f4; }
+.kind-external { color: #7a4a12; background: #f6e2c6; }
+.kind-system   { color: #33414d; background: #dbe3ea; }
+.card-actor { margin-left: auto; }
+.issue-card { cursor: pointer; }
+.issue-card:focus-visible { outline: 2px solid #3f7d5c; outline-offset: 2px; }
+
+@media (prefers-color-scheme: dark) {
+  .detail { background: #1a1f1c; border-left-color: #2c342e; box-shadow: -18px 0 48px rgba(0,0,0,.45); }
+  .detail-close { background: #222a25; border-color: #2c342e; color: #9fb0a5; }
+  .timeline li { border-top-color: #2c342e; }
+  .entry-diff { background: #222a25; }
+  .kind-human    { color: #bfe6cf; background: #26402f; }
+  .kind-agent    { color: #d9c8f0; background: #33254a; }
+  .kind-external { color: #f0d3a8; background: #45341c; }
+  .kind-system   { color: #c6d4de; background: #2a3540; }
+  .timeline-more { background: #222a25; border-color: #2c342e; color: #9fb0a5; }
+}

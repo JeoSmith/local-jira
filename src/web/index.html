@@ -66,6 +66,20 @@
         </div>
         <div id="board" class="board"></div>
       </section>
+
+      <aside id="detail" class="detail" hidden aria-label="이슈 상세">
+        <header class="detail-head">
+          <div>
+            <span id="detail-key" class="issue-key"></span>
+            <h2 id="detail-title"></h2>
+          </div>
+          <button id="detail-close" type="button" class="detail-close" aria-label="닫기">×</button>
+        </header>
+        <h3 class="detail-section">활동</h3>
+        <ol id="timeline" class="timeline"></ol>
+        <p id="timeline-empty" class="column-empty" hidden>활동 기록이 없습니다.</p>
+        <button id="timeline-more" type="button" class="timeline-more" hidden>더 보기</button>
+      </aside>
     </main>
   </body>
 </html>

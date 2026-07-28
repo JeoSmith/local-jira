@@ -15,7 +15,7 @@
  * Bumping SCHEMA_VERSION discards the index and rebuilds from files. That is
  * always safe: nothing here is a source of truth.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const INDEX_SCHEMA = `
 CREATE TABLE file_state (
@@ -189,6 +189,11 @@ CREATE TABLE events (
   target_kind TEXT,
   target_uid  TEXT,
   verb        TEXT,
+  -- The person who directed an agent, kept apart from the agent that acted:
+  -- a timeline that shows only one of them cannot answer "who decided this".
+  initiated_by TEXT,
+  before_json TEXT,
+  after_json  TEXT,
   detail_json TEXT,
   source_path TEXT NOT NULL
 );

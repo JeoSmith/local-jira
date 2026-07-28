@@ -31,6 +31,7 @@ import {
   type UserRecord,
 } from "../domain/users.ts";
 import { buildEvent, redact } from "../domain/events.ts";
+import { activityOf, lastActorKinds } from "../domain/activity.ts";
 import { childrenOf } from "../domain/hierarchy.ts";
 import { claimability, relatedTo } from "../domain/links.ts";
 import {
@@ -331,6 +332,9 @@ async function handle(
     if (rest.endsWith("/links")) {
       return linksRoute(rest.slice(0, -"/links".length), response, authed);
     }
+    if (rest.endsWith("/activity")) {
+      return activityRoute(rest.slice(0, -"/activity".length), url, response, authed);
+    }
     return showIssueRoute(rest, response, authed);
   }
 
@@ -404,7 +408,17 @@ function listIssuesRoute(
       ? Number(url.searchParams.get("limit"))
       : undefined,
   });
-  respondJson(response, 200, { issues });
+  // The badge shows who touched a card last, which is not the same as who
+  // created it: without this an agent's change is indistinguishable from the
+  // human creation underneath it (§5.1, §8).
+  const kinds = lastActorKinds(context.board, issues.map((issue) => issue.uid));
+  respondJson(response, 200, {
+    issues: issues.map(({ createdByKind, ...issue }) => ({
+      ...issue,
+      created_by_kind: createdByKind,
+      last_actor_kind: kinds.get(issue.uid) ?? null,
+    })),
+  });
 }
 
 async function createIssueRoute(
@@ -826,6 +840,42 @@ async function rankRoute(
     }
     return handleWriteError(error, response);
   }
+}
+
+/**
+ * The activity on an issue.
+ *
+ * Its own route rather than part of the issue body, like children and links:
+ * the body is the file and its hash is the ETag, and a timeline grows on its
+ * own every time anything happens.
+ */
+function activityRoute(
+  key: string,
+  url: URL,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const found = findIssue(context.board, key);
+  if (found === null || !("issue" in found)) {
+    return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
+  }
+
+  const limit = url.searchParams.has("limit")
+    ? Number(url.searchParams.get("limit"))
+    : undefined;
+  const { entries, hasMore } = activityOf(context.board, found.issue.uid, {
+    limit: Number.isFinite(limit) ? limit : undefined,
+    before: url.searchParams.get("before"),
+  });
+
+  respondJson(response, 200, {
+    key: found.issue.key,
+    entries,
+    hasMore,
+    // The cursor to ask for the next page with, so a caller never has to
+    // construct one out of an entry it may not fully understand.
+    nextBefore: hasMore && entries.length > 0 ? entries[entries.length - 1].eventId : null,
+  });
 }
 
 /** The relations on an issue, both declared and reversed, plus claimability. */

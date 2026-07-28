@@ -241,6 +241,7 @@ export interface IssueSummary {
   points: number | null;
   assignee: string | null;
   sprint: string | null;
+  createdByKind: string | null;
   labels: string[];
 }
 
@@ -268,7 +269,8 @@ export function listIssues(
 
   const rows = board.db
     .prepare(
-      `SELECT path, uid, project, key, type, status, title, points, assignee_id, sprint_id
+      `SELECT path, uid, project, key, type, status, title, points, assignee_id, sprint_id,
+              created_by_kind
          FROM issues
         WHERE ${where.join(" AND ")}
         ORDER BY backlog_rank, uid
@@ -286,6 +288,9 @@ export function listIssues(
     points: row.points as number | null,
     assignee: row.assignee_id as string | null,
     sprint: row.sprint_id as string | null,
+    // Carried alongside the last actor, never instead of it: one says who made
+    // the issue and never changes, the other says who touched it last (§5.1).
+    createdByKind: row.created_by_kind as string | null,
     labels: labelsOf(board, String(row.path)),
   }));
 }
