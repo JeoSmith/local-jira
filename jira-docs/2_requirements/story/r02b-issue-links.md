@@ -1,6 +1,6 @@
 ---
 title: "이슈 관계 링크와 blocked_by 기반 claimable 판정"
-status: draft
+status: done
 owner: 이성훈
 created: 2026-07-27
 updated: 2026-07-27
@@ -22,18 +22,24 @@ priority: P0
 
 ## 인수 조건 (Acceptance Criteria)
 
-- [ ] Given 이슈 A와 B, When A에 `{kind: blocked_by, to: <B.uid>}` 링크를 추가하면, Then 201이고 A의 파일 frontmatter `links[]`에 해당 항목이 uid 참조로 기록된다.
-- [ ] Given `kind`가 `blocks|blocked_by|relates_to|duplicates` 외의 값, When 링크 추가를 요청하면, Then 400이고 허용 종류 목록이 반환된다.
-- [ ] Given `to`가 존재하지 않는 uid, When 링크 추가를 요청하면, Then 400이다.
-- [ ] Given A가 미완료(=`DONE`/`CANCELLED`가 아닌) B를 `blocked_by`로 걸고 있는 상태, When `GET /issues/{A}`를 조회하면, Then `claimable=false`와 함께 사유(차단 중인 이슈 키 목록)가 반환된다.
-- [ ] Given 위 상태에서 B가 `DONE`으로 전이되면, When A를 다시 조회하면, Then `claimable`을 막던 사유가 사라진다.
-- [ ] Given A가 `claimable=false`인 상태, When 에이전트가 `POST /issues/{A}/claim`을 호출하면, Then 거부되고 응답에 사유가 포함된다(claim 처리 자체는 R16 / AC19).
-- [ ] Given 링크가 있는 이슈, When `DELETE /issues/{key}/links/{link_id}`를 호출하면, Then 200/204이고 `links[]`에서 제거되며 `claimable` 재계산 결과가 즉시 반영된다.
-- [ ] Given 관계가 걸린 이슈 상세 화면, When 화면을 열면, Then 관계 종류별로 상대 이슈 키·제목·상태가 표시된다.
-- [ ] Given 링크 상대편 이슈가 `INVALID`로 격리된 상태, When 그 링크를 변경하려 하면, Then 복구 전까지 차단된다(§5.6, 응답 규격은 R11).
+- [x] Given 이슈 A와 B, When A에 `{kind: blocked_by, to: <B.uid>}` 링크를 추가하면, Then 201이고 A의 파일 frontmatter `links[]`에 해당 항목이 uid 참조로 기록된다.
+- [x] Given `kind`가 `blocks|blocked_by|relates_to|duplicates` 외의 값, When 링크 추가를 요청하면, Then 400이고 허용 종류 목록이 반환된다.
+- [x] Given `to`가 존재하지 않는 uid, When 링크 추가를 요청하면, Then 400이다.
+- [x] Given A가 미완료(=`DONE`/`CANCELLED`가 아닌) B를 `blocked_by`로 걸고 있는 상태, When `GET /issues/{A}`를 조회하면, Then `claimable=false`와 함께 사유(차단 중인 이슈 키 목록)가 반환된다.
+- [x] Given 위 상태에서 B가 `DONE`으로 전이되면, When A를 다시 조회하면, Then `claimable`을 막던 사유가 사라진다.
+- [ ] Given A가 `claimable=false`인 상태, When 에이전트가 `POST /issues/{A}/claim`을 호출하면, Then 거부되고 응답에 사유가 포함된다(claim 처리 자체는 R16 / AC19).  
+      **→ 이월: r16-claim-lease(M4) — claim 엔드포인트 자체가 M4**
+- [x] Given 링크가 있는 이슈, When `DELETE /issues/{key}/links/{link_id}`를 호출하면, Then 200/204이고 `links[]`에서 제거되며 `claimable` 재계산 결과가 즉시 반영된다.
+- [x] Given 관계가 걸린 이슈 상세 화면, When 화면을 열면, Then 관계 종류별로 상대 이슈 키·제목·상태가 표시된다.
+- [ ] Given 링크 상대편 이슈가 `INVALID`로 격리된 상태, When 그 링크를 변경하려 하면, Then 복구 전까지 차단된다(§5.6, 응답 규격은 R11).  
+      **→ 이월: r11a-integrity-quarantine(Wave 4) — 격리 판정과 응답 규격이 R11**
 
-> ⚠ 미정: `blocks`와 `blocked_by`의 역방향 링크를 서버가 자동으로 상대 이슈 파일에 기록하는지(양방향 저장) 아니면 인덱스에서만 역참조로 계산하는지, 그리고 자기 자신 링크·동일 쌍 중복 링크의 처리를 PRD가 정하지 않았다.
-> ⚠ 미정: "미완료 `blocked_by`"에서 `CANCELLED` 상태 차단자를 완료로 볼지 여부가 §5.2·§6.1에 명시되어 있지 않다(위 AC는 완료로 간주한 안).
+> ✅ 해소(S1-D4): **선언한 쪽 파일에만 저장하고 역방향은 인덱스가 계산한다.** 양방향 저장은
+> 링크 하나에 두 파일을 고쳐 머지 충돌 면적이 두 배가 되고 부분 실패 상태가 생긴다.
+> 자기 자신 링크는 400, 같은 `(from, to, kind)` 재요청은 멱등 200(no-op), 양쪽이 각각
+> 선언한 같은 관계는 인덱스가 1건으로 합친다.
+> ✅ 해소(S1-D5): **`CANCELLED` 차단자는 해제된 것으로 본다.** 하지 않기로 한 일이
+> 남의 진행을 영구히 막아서는 안 된다.
 
 ## 범위 밖 (Out of Scope)
 

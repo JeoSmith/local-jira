@@ -19,6 +19,7 @@ import {
 } from "./issue.ts";
 import { buildEvent } from "./events.ts";
 import { canHaveChildren, childrenOf, validateParent } from "./hierarchy.ts";
+import { declaredLinks, validateLink, type Link } from "./links.ts";
 import {
   allowedTargets,
   isStatus,
@@ -231,6 +232,27 @@ export function patchIssueFile(original: string, input: UpdateIssueInput): strin
 }
 
 /**
+ * Rewrites the `links:` block.
+ *
+ * Only the declaring side's file is ever touched (S1-D4): a relation written on
+ * both ends doubles the merge surface and can end up half applied, with one
+ * file claiming a link the other has never heard of.
+ */
+export function patchLinks(original: string, links: Link[]): string {
+  const match = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n)([\s\S]*)$/.exec(original);
+  if (!match) {
+    throw new IssueError("E_INVALID_TITLE", "The issue file has no frontmatter");
+  }
+
+  const rendered = links.length === 0
+    ? []
+    : ["links:", ...links.map((link) => `  - {kind: ${link.kind}, to: ${link.to}}`)];
+
+  const lines = setBlock(match[2].split("\n"), "links", rendered);
+  return `${match[1]}${lines.join("\n")}${match[3]}${match[4]}`;
+}
+
+/**
  * Stamps the fields the server owns after a change is known to be real.
  *
  * Separate from `patchIssueFile` on purpose: if this ran inside the field
@@ -425,6 +447,128 @@ function ensureNewline(value: string): string {
 function hashOf(contents: string): string {
   // The same function the writer uses, so the CAS compares like with like.
   return fileHash(Buffer.from(contents, "utf8"));
+}
+
+/**
+ * Adds a link to the issue that declares it.
+ *
+ * Idempotent by pair: re-sending the same `(kind, to)` is a no-op that returns
+ * the issue unchanged (S1-D4), so a retry after a dropped response cannot end
+ * up with the relation listed twice.
+ */
+export async function addLink(
+  writable: WritableBoard,
+  key: string,
+  ifMatch: string | null,
+  input: { kind: string; to: string },
+  actor: Actor,
+): Promise<UpdateResult> {
+  const board = writable.board;
+  const issue = requireIssue(board, key);
+  const link = validateLink(board, issue.uid, input.kind, input.to);
+
+  requirePrecondition(issue, ifMatch, { link: { current: null, requested: link.id } });
+
+  const existing = declaredLinks(issue.resource);
+  if (existing.some((entry) => entry.id === link.id)) {
+    return { issue, changed: false };
+  }
+
+  return applyLinks(writable, issue, [...existing, link], actor, {
+    verb: "issue.updated",
+    detail: { key, link: link.id, added: link.id },
+  });
+}
+
+/** Removes a link. Only the file that declares it can drop it (S1-D4). */
+export async function removeLink(
+  writable: WritableBoard,
+  key: string,
+  ifMatch: string | null,
+  id: string,
+  actor: Actor,
+): Promise<UpdateResult> {
+  const board = writable.board;
+  const issue = requireIssue(board, key);
+
+  const existing = declaredLinks(issue.resource);
+  const remaining = existing.filter((entry) => entry.id !== id);
+  if (remaining.length === existing.length) {
+    throw new IssueError(
+      "E_LINK_NOT_FOUND",
+      `${key} does not declare a link ${id}.`,
+      "A relation shown from the other side has to be removed on the issue that declared it.",
+    );
+  }
+
+  requirePrecondition(issue, ifMatch, { link: { current: id, requested: null } });
+
+  return applyLinks(writable, issue, remaining, actor, {
+    verb: "issue.updated",
+    detail: { key, link: id, removed: id },
+  });
+}
+
+async function applyLinks(
+  writable: WritableBoard,
+  issue: IssueDetail,
+  links: Link[],
+  actor: Actor,
+  event: { verb: "issue.updated"; detail: Record<string, JsonValue> },
+): Promise<UpdateResult> {
+  const board = writable.board;
+  const absolute = path.join(board.boardRoot, issue.path);
+  const original = fs.readFileSync(absolute, "utf8");
+  const patched = patchLinks(original, links);
+
+  if (patched === original) {
+    return { issue, changed: false };
+  }
+
+  const now = timestamp(projectTimezone(board, issue.project));
+  const before = declaredLinks(issue.resource).map((entry) => entry.id);
+
+  await writable.writer.write({
+    kind: "update",
+    targetPath: issue.path,
+    contents: touchMetadata(patched, now, actor.kind),
+    expectedHash: hashOf(original),
+    event: buildEvent(board.localDirectory, {
+      verb: event.verb,
+      targetKind: "issue",
+      targetUid: issue.uid,
+      actor: { id: actor.id, kind: actor.kind },
+      before: { links: before },
+      after: { links: links.map((entry) => entry.id) },
+      detail: event.detail,
+      at: now,
+    }),
+    actorId: actor.id,
+    actorKind: actor.kind,
+  });
+
+  return { issue: requireIssue(board, issue.key), changed: true };
+}
+
+function requireIssue(board: WritableBoard["board"], key: string): IssueDetail {
+  const found = findIssue(board, key);
+  if (found === null || !("issue" in found)) {
+    throw new IssueError("E_UNKNOWN_PROJECT", `No issue with key ${key}`);
+  }
+  return found.issue;
+}
+
+function requirePrecondition(
+  issue: IssueDetail,
+  ifMatch: string | null,
+  conflicts: Record<string, FieldConflict>,
+): void {
+  if (ifMatch === null) {
+    throw new PreconditionRequiredError(issue.etag);
+  }
+  if (normaliseEtag(ifMatch) !== issue.etag) {
+    throw new PreconditionFailedError(issue.etag, issue.resource as JsonValue, conflicts);
+  }
 }
 
 // ── status transitions and deletion (r01b) ──────────────────────────────────

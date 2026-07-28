@@ -36,7 +36,11 @@ export type IssueErrorCode =
   | "E_PARENT_NOT_FOUND"
   | "E_PARENT_CYCLE"
   | "E_CHILDREN_PRESENT"
-  | "E_STRATEGY_IMPOSSIBLE";
+  | "E_STRATEGY_IMPOSSIBLE"
+  | "E_INVALID_LINK_KIND"
+  | "E_LINK_SELF"
+  | "E_LINK_TARGET_NOT_FOUND"
+  | "E_LINK_NOT_FOUND";
 
 export class IssueError extends Error {
   readonly code: IssueErrorCode;

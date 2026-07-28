@@ -8,8 +8,10 @@ import { AuthorizationError, require as requireCapability, type Capability } fro
 import { CredentialStore } from "../auth/credentials.ts";
 import { createIssue, IssueError } from "../domain/issue.ts";
 import {
+  addLink,
   ChildrenPresentError,
   deleteIssue,
+  removeLink,
   IMMUTABLE_FIELDS,
   PreconditionFailedError,
   PreconditionRequiredError,
@@ -30,6 +32,7 @@ import {
 } from "../domain/users.ts";
 import { buildEvent, redact } from "../domain/events.ts";
 import { childrenOf } from "../domain/hierarchy.ts";
+import { claimability, relatedTo } from "../domain/links.ts";
 import { canonicalJson, type JsonValue } from "../storage/jcs.ts";
 import {
   findIssue,
@@ -267,6 +270,21 @@ async function handle(
       transitionRoute(key, request, response, authed),
     );
   }
+  if (request.method === "POST" && url.pathname.endsWith("/links")) {
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/links".length));
+    return guard(response, authed, "issue:write", () =>
+      addLinkRoute(key, request, response, authed),
+    );
+  }
+  if (request.method === "DELETE" && url.pathname.includes("/links/")) {
+    const [key, id] = url.pathname
+      .slice("/issues/".length)
+      .split("/links/")
+      .map((part) => decodeURIComponent(part));
+    return guard(response, authed, "issue:write", () =>
+      removeLinkRoute(key, id, request, response, authed),
+    );
+  }
   if (request.method === "DELETE" && url.pathname.startsWith("/issues/")) {
     return guard(response, authed, "issue:delete", () =>
       deleteRoute(
@@ -294,6 +312,9 @@ async function handle(
     const rest = decodeURIComponent(url.pathname.slice("/issues/".length));
     if (rest.endsWith("/children")) {
       return childrenRoute(rest.slice(0, -"/children".length), response, authed);
+    }
+    if (rest.endsWith("/links")) {
+      return linksRoute(rest.slice(0, -"/links".length), response, authed);
     }
     return showIssueRoute(rest, response, authed);
   }
@@ -703,6 +724,7 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
   }
   if (error instanceof IssueError) {
     const status = error.code === "E_UNKNOWN_PROJECT" ? 404
+      : error.code === "E_LINK_NOT_FOUND" ? 404
       : error.code === "E_KEY_COLLISION" ? 409
       : error.code === "E_STRATEGY_IMPOSSIBLE" ? 409
       : 400;
@@ -730,6 +752,75 @@ function childrenRoute(
     return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
   }
   respondJson(response, 200, { children: childrenOf(context.board, found.issue.uid) });
+}
+
+/** The relations on an issue, both declared and reversed, plus claimability. */
+function linksRoute(
+  key: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const found = findIssue(context.board, key);
+  if (found === null || !("issue" in found)) {
+    return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
+  }
+  respondJson(response, 200, {
+    links: relatedTo(context.board, found.issue.uid),
+    ...claimability(context.board, found.issue.uid),
+  });
+}
+
+async function addLinkRoute(
+  key: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  try {
+    const result = await addLink(
+      context.writable,
+      key,
+      headerValue(request, "if-match"),
+      { kind: String(body.kind ?? ""), to: String(body.to ?? "") },
+      actorOf(context),
+    );
+    if (result.changed) {
+      publishIssueChange(context, result.issue.key, result.issue.uid, "updated");
+    }
+    respondResource(
+      response,
+      result.changed ? 201 : 200,
+      result.issue.resource as JsonValue,
+      result.issue.etag,
+    );
+  } catch (error) {
+    return handleWriteError(error, response);
+  }
+}
+
+async function removeLinkRoute(
+  key: string,
+  id: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  try {
+    const result = await removeLink(
+      context.writable,
+      key,
+      headerValue(request, "if-match"),
+      id,
+      actorOf(context),
+    );
+    if (result.changed) {
+      publishIssueChange(context, result.issue.key, result.issue.uid, "updated");
+    }
+    respondResource(response, 200, result.issue.resource as JsonValue, result.issue.etag);
+  } catch (error) {
+    return handleWriteError(error, response);
+  }
 }
 
 function showIssueRoute(
@@ -772,6 +863,15 @@ function showIssueRoute(
   const children = childrenOf(context.board, found.issue.uid);
   if (children.length > 0) {
     response.setHeader("X-Child-Count", String(children.length));
+  }
+
+  // Derived from other issues' states, so it belongs outside the body for the
+  // same reason: an issue's validator must not move because its blocker was
+  // closed. /issues/{key}/links carries the reasons in full.
+  const claim = claimability(context.board, found.issue.uid);
+  response.setHeader("X-Claimable", String(claim.claimable));
+  if (claim.blockedBy.length > 0) {
+    response.setHeader("X-Blocked-By", claim.blockedBy.join(","));
   }
 
   // ADR-003: the ETag is the hash of the bytes actually sent, so a single
