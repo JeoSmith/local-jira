@@ -319,12 +319,15 @@ function eventRecords(identity: FileIdentity, bytes: Buffer): FileRecords {
         }
         db.prepare(
           `INSERT OR REPLACE INTO events(event_id, at, actor_id, actor_kind, run_id,
-             target_kind, target_uid, verb, detail_json, source_path)
-           VALUES(?,?,?,?,?,?,?,?,?,?)`,
+             target_kind, target_uid, verb, initiated_by, before_json, after_json,
+             detail_json, source_path)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         ).run(
           eventId, str(event.at) ?? "", str(event.actor_id), str(event.actor_kind),
           str(event.run_id), str(event.target_kind), str(event.target_uid),
-          str(event.verb),
+          str(event.verb), str(event.initiated_by),
+          event.before === undefined || event.before === null ? null : canonicalJson(event.before),
+          event.after === undefined || event.after === null ? null : canonicalJson(event.after),
           event.detail === undefined ? null : canonicalJson(event.detail),
           identity.path,
         );
