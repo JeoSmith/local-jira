@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { createUlid } from "../bootstrap/identifier.ts";
+import { buildEvent } from "../domain/events.ts";
 import type { WritableBoard } from "./board.ts";
 import { classify } from "./layout.ts";
 import { incrementalSync } from "./reindex.ts";
@@ -56,10 +56,16 @@ export async function reconcileExternal(
       kind: "event",
       targetPath: relative,
       contents: null,
-      event: buildExternalEvent(board.localDirectory, change),
-      // §5.7: a change that did not come through the API has no authenticated
-      // actor. Attributing it to a git author would promote a guess into an
-      // identity the audit trail then treats as verified.
+      event: buildEvent(board.localDirectory, {
+        verb: "issue.changed_externally",
+        targetKind: "issue",
+        targetUid: change.uid,
+        // §5.7: a change that did not come through the API has no
+        // authenticated actor, and a git author is a guess. Recording one as
+        // actor_id would put an unverified identity into the audit trail.
+        actor: { id: "unknown", kind: "external" },
+        detail: { key: change.key, path: change.path, source_commit: null },
+      }),
       actorId: null,
       actorKind: "external",
     });
@@ -78,42 +84,4 @@ function isReportable(relative: string): boolean {
   // Event files are append-only records of changes; an event about an event
   // would recurse on every reconciliation.
   return identity.kind !== "event";
-}
-
-function buildExternalEvent(
-  localDirectory: string,
-  change: ExternalChange,
-): { eventId: string; path: string; line: string } {
-  const eventId = createUlid();
-  const at = `${new Date().toISOString().slice(0, 19)}Z`;
-
-  return {
-    eventId,
-    path: `events/${at.slice(0, 10)}/${nodeId(localDirectory)}.jsonl`,
-    line: JSON.stringify({
-      event_id: eventId,
-      at,
-      actor_id: "unknown",
-      actor_kind: "external",
-      target_kind: "issue",
-      target_uid: change.uid,
-      verb: "issue.changed_externally",
-      detail: {
-        key: change.key,
-        path: change.path,
-        // Recorded only as a hint. It is not evidence of who edited the file,
-        // and nothing may treat it as an authenticated actor.
-        source_commit: null,
-      },
-    }),
-  };
-}
-
-function nodeId(localDirectory: string): string {
-  try {
-    const contents = fs.readFileSync(path.join(localDirectory, "node.yaml"), "utf8");
-    return /^node_id:\s*(\S+)$/m.exec(contents)?.[1] ?? "unknown";
-  } catch {
-    return "unknown";
-  }
 }

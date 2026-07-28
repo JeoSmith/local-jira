@@ -6,6 +6,7 @@ import { yamlScalar } from "../bootstrap/scaffold.ts";
 import type { BoardHandle, WritableBoard } from "../storage/board.ts";
 import { findIssue, type IssueDetail } from "../storage/board.ts";
 import { issuePath } from "../storage/layout.ts";
+import { buildEvent } from "./events.ts";
 
 export const ISSUE_TYPES = [
   "epic",
@@ -123,7 +124,14 @@ export async function createIssue(
     targetPath: relative,
     contents,
     expectedHash: null,
-    event: buildEvent(board, uid, key, actor, now),
+    event: buildEvent(board.localDirectory, {
+      verb: "issue.created",
+      targetKind: "issue",
+      targetUid: uid,
+      actor: { id: actor.id, kind: actor.kind },
+      after: { key, type, title, status: INITIAL_STATUS, points },
+      at: now,
+    }),
     actorId: actor.id,
     actorKind: actor.kind,
   });
@@ -347,51 +355,4 @@ function ensureTrailingNewline(value: string): string {
 function isControl(char: string): boolean {
   const code = char.codePointAt(0) ?? 0;
   return (code >= 0 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f);
-}
-
-/**
- * Builds the event that accompanies the write.
- *
- * Event files are per-day and per-node so two clones appending on the same day
- * never touch the same file, which is what keeps the log out of every merge
- * (PRD §5.3).
- */
-function buildEvent(
-  board: BoardHandle,
-  uid: string,
-  key: string,
-  actor: Actor,
-  at: string,
-): { eventId: string; path: string; line: string } {
-  const eventId = createUlid();
-  const day = at.slice(0, 10);
-  const node = nodeId(board);
-
-  return {
-    eventId,
-    path: `events/${day}/${node}.jsonl`,
-    line: JSON.stringify({
-      event_id: eventId,
-      at,
-      actor_id: actor.id,
-      actor_kind: actor.kind,
-      target_kind: "issue",
-      target_uid: uid,
-      verb: "issue.created",
-      detail: { key },
-    }),
-  };
-}
-
-function nodeId(board: BoardHandle): string {
-  try {
-    const contents = fs.readFileSync(
-      path.join(board.localDirectory, "node.yaml"),
-      "utf8",
-    );
-    return /^node_id:\s*(\S+)$/m.exec(contents)?.[1] ?? "unknown";
-  } catch {
-    // A board that predates node identity still has to be writable.
-    return "unknown";
-  }
 }

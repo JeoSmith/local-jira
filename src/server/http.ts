@@ -23,6 +23,7 @@ import {
   type Role,
   type UserRecord,
 } from "../domain/users.ts";
+import { buildEvent, redact } from "../domain/events.ts";
 import { canonicalJson, type JsonValue } from "../storage/jcs.ts";
 import {
   findIssue,
@@ -436,6 +437,17 @@ async function guard(
     requireCapability(context.user!.role, capability);
   } catch (error) {
     if (error instanceof AuthorizationError) {
+      // A refused attempt on an operational capability is itself auditable —
+      // "who tried to manage accounts" is exactly what N7 wants recorded.
+      if (capability === "user:manage" || capability === "token:manage") {
+        await recordEvent(context, {
+          verb: "access.denied",
+          targetKind: "board",
+          targetUid: null,
+          actor: { id: context.user!.id, kind: "human" },
+          detail: { capability, role: context.user!.role },
+        });
+      }
       // 403, not 401: the caller is known, and repeating the request with the
       // same identity will never succeed.
       return respondError(response, 403, error.code, error.message, `Required: ${capability}`);
@@ -459,6 +471,16 @@ async function createUserRoute(
         role: String(body.role ?? "member") as Role,
         password: String(body.password ?? ""),
       });
+      // N7 counts account changes as auditable. `redact` runs even though the
+      // record here holds nothing secret, so the guarantee does not depend on
+      // this call site staying careful.
+      await recordEvent(context, {
+        verb: "user.created",
+        targetKind: "user",
+        targetUid: user.id,
+        actor: { id: context.user!.id, kind: "human" },
+        after: redact({ ...user }),
+      });
       respondJson(response, 201, { user });
     } catch (error) {
       return respondUserError(error, response);
@@ -476,6 +498,14 @@ async function changeRoleRoute(
     const body = await readJson(request);
     try {
       const change = changeRole(context.board, userId, String(body.role ?? "") as Role);
+      await recordEvent(context, {
+        verb: "user.role_changed",
+        targetKind: "user",
+        targetUid: userId,
+        actor: { id: context.user!.id, kind: "human" },
+        before: { role: change.from },
+        after: { role: change.to },
+      });
       respondJson(response, 200, { user: userId, from: change.from, to: change.to });
     } catch (error) {
       return respondUserError(error, response);
@@ -489,6 +519,22 @@ function respondUserError(error: unknown, response: http.ServerResponse): void {
     return respondError(response, status, error.code, error.message, error.detail);
   }
   throw error;
+}
+
+/** Appends an event that is not attached to a file write. */
+async function recordEvent(
+  context: RequestContext,
+  input: Parameters<typeof buildEvent>[1],
+): Promise<void> {
+  const event = buildEvent(context.board.localDirectory, input);
+  await context.writable.writer.write({
+    kind: "event",
+    targetPath: event.path,
+    contents: null,
+    event,
+    actorId: input.actor.id,
+    actorKind: input.actor.kind,
+  });
 }
 
 function actorOf(context: RequestContext): { id: string; kind: "human" | "agent" } {

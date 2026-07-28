@@ -7,6 +7,7 @@ import type { JsonValue } from "../storage/jcs.ts";
 import { findIssue, type IssueDetail, type WritableBoard } from "../storage/board.ts";
 import { fileHash, parseMarkdownResource } from "../storage/resource.ts";
 import { IssueError, MAX_POINTS, type Actor } from "./issue.ts";
+import { buildEvent } from "./events.ts";
 import {
   allowedTargets,
   isStatus,
@@ -133,7 +134,16 @@ export async function updateIssue(
     targetPath: issue.path,
     contents: patched,
     expectedHash: hashOf(original),
-    event: buildUpdateEvent(board.localDirectory, issue.uid, key, actor, now, input),
+    event: buildEvent(board.localDirectory, {
+      verb: "issue.updated",
+      targetKind: "issue",
+      targetUid: issue.uid,
+      actor: { id: actor.id, kind: actor.kind },
+      before: changedFields(issue.resource as Record<string, JsonValue>, input, "before"),
+      after: changedFields(issue.resource as Record<string, JsonValue>, input, "after"),
+      detail: { key },
+      at: now,
+    }),
     actorId: actor.id,
     actorKind: actor.kind,
   });
@@ -287,40 +297,6 @@ function normaliseLabels(labels: string[]): string[] {
   return [...seen].sort();
 }
 
-function buildUpdateEvent(
-  localDirectory: string,
-  uid: string,
-  key: string,
-  actor: Actor,
-  at: string,
-  input: UpdateIssueInput,
-): { eventId: string; path: string; line: string } {
-  const eventId = createUlid();
-  return {
-    eventId,
-    path: `events/${at.slice(0, 10)}/${nodeId(localDirectory)}.jsonl`,
-    line: JSON.stringify({
-      event_id: eventId,
-      at,
-      actor_id: actor.id,
-      actor_kind: actor.kind,
-      target_kind: "issue",
-      target_uid: uid,
-      verb: "issue.updated",
-      detail: { key, fields: Object.keys(input).filter((field) => field !== "status") },
-    }),
-  };
-}
-
-function nodeId(localDirectory: string): string {
-  try {
-    const contents = fs.readFileSync(path.join(localDirectory, "node.yaml"), "utf8");
-    return /^node_id:\s*(\S+)$/m.exec(contents)?.[1] ?? "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
 function ensureNewline(value: string): string {
   return value === "" || value.endsWith("\n") ? value : `${value}\n`;
 }
@@ -425,7 +401,16 @@ export async function transitionIssue(
     targetPath: issue.path,
     contents: patched,
     expectedHash: hashOf(original),
-    event: buildTransitionEvent(board.localDirectory, issue.uid, key, actor, now, from, input),
+    event: buildEvent(board.localDirectory, {
+      verb: "issue.transitioned",
+      targetKind: "issue",
+      targetUid: issue.uid,
+      actor: { id: actor.id, kind: actor.kind },
+      before: { status: from },
+      after: { status: input.to },
+      detail: { key, reason: input.reason ?? null },
+      at: now,
+    }),
     actorId: actor.id,
     actorKind: actor.kind,
   });
@@ -499,58 +484,34 @@ export async function deleteIssue(
     targetPath: issue.path,
     contents: null,
     expectedHash: hashOf(fs.readFileSync(absolute, "utf8")),
-    event: buildDeleteEvent(board.localDirectory, issue.uid, key, actor, now),
+    event: buildEvent(board.localDirectory, {
+      verb: "issue.deleted",
+      targetKind: "issue",
+      targetUid: issue.uid,
+      actor: { id: actor.id, kind: actor.kind },
+      before: { key, status: (issue.resource as Record<string, unknown>).status ?? null },
+      detail: { key },
+      at: now,
+    }),
     actorId: actor.id,
     actorKind: actor.kind,
   });
 }
 
-function buildTransitionEvent(
-  localDirectory: string,
-  uid: string,
-  key: string,
-  actor: Actor,
-  at: string,
-  from: Status,
-  input: TransitionInput,
-): { eventId: string; path: string; line: string } {
-  const eventId = createUlid();
-  return {
-    eventId,
-    path: `events/${at.slice(0, 10)}/${nodeId(localDirectory)}.jsonl`,
-    line: JSON.stringify({
-      event_id: eventId,
-      at,
-      actor_id: actor.id,
-      actor_kind: actor.kind,
-      target_kind: "issue",
-      target_uid: uid,
-      verb: "issue.transitioned",
-      detail: { key, from, to: input.to, reason: input.reason ?? null },
-    }),
-  };
-}
-
-function buildDeleteEvent(
-  localDirectory: string,
-  uid: string,
-  key: string,
-  actor: Actor,
-  at: string,
-): { eventId: string; path: string; line: string } {
-  const eventId = createUlid();
-  return {
-    eventId,
-    path: `events/${at.slice(0, 10)}/${nodeId(localDirectory)}.jsonl`,
-    line: JSON.stringify({
-      event_id: eventId,
-      at,
-      actor_id: actor.id,
-      actor_kind: actor.kind,
-      target_kind: "issue",
-      target_uid: uid,
-      verb: "issue.deleted",
-      detail: { key },
-    }),
-  };
+/** The named fields only, so a diff shows what the request actually touched. */
+function changedFields(
+  current: Record<string, JsonValue>,
+  input: UpdateIssueInput,
+  side: "before" | "after",
+): JsonValue {
+  const out: Record<string, JsonValue> = {};
+  for (const field of UPDATABLE) {
+    const requested = input[field as keyof UpdateIssueInput];
+    if (requested === undefined) {
+      continue;
+    }
+    const key = field === "description" ? "body" : field;
+    out[key] = side === "before" ? ((current[key] ?? null) as JsonValue) : (requested as JsonValue);
+  }
+  return out;
 }
