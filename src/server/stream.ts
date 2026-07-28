@@ -13,6 +13,11 @@ interface BufferedEvent extends StreamEvent {
   seq: number;
 }
 
+export interface StreamSession {
+  key: string;
+  expiresAt: number;
+}
+
 /**
  * Server-sent events for change propagation (design §3.9).
  *
@@ -28,7 +33,7 @@ export class EventStream {
   readonly epoch = createUlid();
   #seq = 0;
   #buffer: BufferedEvent[] = [];
-  #clients = new Set<http.ServerResponse>();
+  #clients = new Map<http.ServerResponse, { sessionKey: string; expiry: NodeJS.Timeout }>();
 
   get clientCount(): number {
     return this.#clients.size;
@@ -38,7 +43,11 @@ export class EventStream {
     return `${this.epoch}-${this.#seq}`;
   }
 
-  attach(request: http.IncomingMessage, response: http.ServerResponse): void {
+  attach(
+    request: http.IncomingMessage,
+    response: http.ServerResponse,
+    session: StreamSession,
+  ): void {
     response.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
@@ -61,10 +70,13 @@ export class EventStream {
       }
     }
 
-    this.#clients.add(response);
-    response.on("close", () => {
-      this.#clients.delete(response);
-    });
+    const expiry = setTimeout(
+      () => response.end(),
+      Math.max(0, session.expiresAt - Date.now()),
+    );
+    expiry.unref();
+    this.#clients.set(response, { sessionKey: session.key, expiry });
+    response.on("close", () => this.#remove(response));
   }
 
   publish(event: StreamEvent): void {
@@ -76,16 +88,33 @@ export class EventStream {
       this.#buffer.splice(0, this.#buffer.length - STREAM_BUFFER);
     }
 
-    for (const client of this.#clients) {
+    for (const client of this.#clients.keys()) {
       this.#send(client, buffered);
     }
   }
 
-  close(): void {
-    for (const client of this.#clients) {
-      client.end();
+  disconnect(sessionKey: string): void {
+    for (const [client, session] of this.#clients) {
+      if (session.sessionKey === sessionKey) {
+        client.end();
+        this.#remove(client);
+      }
     }
-    this.#clients.clear();
+  }
+
+  close(): void {
+    for (const client of this.#clients.keys()) {
+      client.end();
+      this.#remove(client);
+    }
+  }
+
+  #remove(response: http.ServerResponse): void {
+    const client = this.#clients.get(response);
+    if (client) {
+      clearTimeout(client.expiry);
+      this.#clients.delete(response);
+    }
   }
 
   /**

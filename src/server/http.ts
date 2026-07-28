@@ -1,5 +1,8 @@
 import http from "node:http";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
 import type { AddressInfo } from "node:net";
+import { fileURLToPath } from "node:url";
 
 import { AuthorizationError, require as requireCapability, type Capability } from "../auth/authorize.ts";
 import { CredentialStore } from "../auth/credentials.ts";
@@ -63,6 +66,12 @@ interface RequestContext {
   stream: EventStream;
   user: UserRecord | null;
 }
+
+const WEB_ASSETS = new Map([
+  ["/", { file: "../web/index.html", type: "text/html; charset=utf-8" }],
+  ["/app.css", { file: "../web/app.css", type: "text/css; charset=utf-8" }],
+  ["/app.js", { file: "../web/app.js", type: "text/javascript; charset=utf-8" }],
+] as const);
 
 export async function startServer(options: ServerOptions): Promise<RunningServer> {
   // Acquiring the writer lock here is what makes a second server refuse to
@@ -157,6 +166,10 @@ async function handle(
   const url = new URL(request.url ?? "/", "http://localhost");
   const route = `${request.method} ${url.pathname}`;
 
+  if (request.method === "GET" && WEB_ASSETS.has(url.pathname)) {
+    return serveWebAsset(url.pathname, response);
+  }
+
   if (route === "POST /auth/login") {
     return login(request, response, context);
   }
@@ -179,7 +192,15 @@ async function handle(
   const authed: RequestContext = { ...context, user };
 
   if (route === "GET /stream") {
-    return context.stream.attach(request, response);
+    const token = sessionToken(request)!;
+    const session = context.store.touchSession(token);
+    if (!session) {
+      return respondError(response, 401, "E_UNAUTHENTICATED", "Sign in first.");
+    }
+    return context.stream.attach(request, response, {
+      key: streamSessionKey(token),
+      expiresAt: session.expiresAt,
+    });
   }
   if (route === "GET /me") {
     return respondJson(response, 200, { user });
@@ -244,6 +265,25 @@ async function handle(
   respondError(response, 404, "E_NOT_FOUND", `No route for ${route}`);
 }
 
+function serveWebAsset(pathname: string, response: http.ServerResponse): void {
+  const asset = WEB_ASSETS.get(pathname);
+  if (!asset) {
+    return respondError(response, 404, "E_NOT_FOUND", "Not found.");
+  }
+
+  const body = fs.readFileSync(fileURLToPath(new URL(asset.file, import.meta.url)));
+  response.writeHead(200, {
+    "Content-Type": asset.type,
+    "Content-Length": body.byteLength,
+    "Cache-Control": "no-cache",
+    "Content-Security-Policy":
+      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+  });
+  response.end(body);
+}
+
 async function login(
   request: http.IncomingMessage,
   response: http.ServerResponse,
@@ -274,6 +314,7 @@ async function logout(
   const token = sessionToken(request);
   if (token) {
     context.store.destroySession(token);
+    context.stream.disconnect(streamSessionKey(token));
   }
   response.setHeader("Set-Cookie", `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict`);
   respondJson(response, 200, { ok: true });
@@ -323,6 +364,7 @@ async function createIssueRoute(
     );
 
     response.setHeader("Location", `/issues/${issue.key}`);
+    publishIssueChange(context, issue.key, issue.uid, "created");
     respondResource(response, 201, issue.resource as JsonValue, issue.etag);
   } catch (error) {
     if (error instanceof IssueError) {
@@ -366,6 +408,9 @@ async function updateIssueRoute(
       { id: context.user!.id, kind: context.user!.role === "agent" ? "agent" : "human" },
     );
 
+    if (result.changed) {
+      publishIssueChange(context, result.issue.key, result.issue.uid, "updated");
+    }
     respondResource(response, 200, result.issue.resource as JsonValue, result.issue.etag);
   } catch (error) {
     return handleWriteError(error, response);
@@ -389,6 +434,9 @@ async function transitionRoute(
       actorOf(context),
       context.user!.role,
     );
+    if (result.changed) {
+      publishIssueChange(context, result.issue.key, result.issue.uid, "transitioned");
+    }
     respondResource(response, 200, result.issue.resource as JsonValue, result.issue.etag);
   } catch (error) {
     if (error instanceof TransitionError) {
@@ -412,11 +460,26 @@ async function deleteRoute(
   context: RequestContext,
 ): Promise<void> {
   try {
+    const found = findIssue(context.board, key);
+    const uid = found && "issue" in found ? found.issue.uid : null;
     await deleteIssue(context.writable, key, headerValue(request, "if-match"), actorOf(context));
+    publishIssueChange(context, key, uid, "deleted");
     response.writeHead(204).end();
   } catch (error) {
     return handleWriteError(error, response);
   }
+}
+
+function publishIssueChange(
+  context: RequestContext,
+  key: string,
+  uid: string | null,
+  action: "created" | "updated" | "transitioned" | "deleted",
+): void {
+  context.stream.publish({
+    type: "issue.changed",
+    data: { key, uid, source: "api", action },
+  });
 }
 
 /**
@@ -629,6 +692,10 @@ function sessionToken(request: http.IncomingMessage): string | null {
     }
   }
   return null;
+}
+
+function streamSessionKey(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
 function cookie(token: string, expiresAt: number): string {
