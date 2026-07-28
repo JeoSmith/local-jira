@@ -4,8 +4,12 @@ import type { AddressInfo } from "node:net";
 import { CredentialStore } from "../auth/credentials.ts";
 import { createIssue, IssueError } from "../domain/issue.ts";
 import {
+  deleteIssue,
+  IMMUTABLE_FIELDS,
   PreconditionFailedError,
   PreconditionRequiredError,
+  transitionIssue,
+  TransitionError,
   updateIssue,
 } from "../domain/update.ts";
 import {
@@ -72,17 +76,25 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   });
 
   const address = server.address() as AddressInfo;
+  // Closing twice is easy to do — a test that closes explicitly and also
+  // registers a cleanup hook, for instance. http.Server does not invoke the
+  // callback the second time, so without memoising this the second await
+  // never settles.
+  let closing: Promise<void> | null = null;
+
   return {
     url: `http://${options.host ?? "127.0.0.1"}:${address.port}`,
     port: address.port,
-    close: () =>
-      new Promise<void>((resolve) => {
+    close: () => {
+      closing ??= new Promise<void>((resolve) => {
         server.closeAllConnections?.();
         server.close(() => {
           store.close();
           void writable.close().then(resolve);
         });
-      }),
+      });
+      return closing;
+    },
   };
 }
 
@@ -123,6 +135,20 @@ async function handle(
   }
   if (route === "POST /issues") {
     return createIssueRoute(request, response, authed);
+  }
+  if (request.method === "POST" && url.pathname.endsWith("/transitions")) {
+    const key = decodeURIComponent(
+      url.pathname.slice("/issues/".length, -"/transitions".length),
+    );
+    return transitionRoute(key, request, response, authed);
+  }
+  if (request.method === "DELETE" && url.pathname.startsWith("/issues/")) {
+    return deleteRoute(
+      decodeURIComponent(url.pathname.slice("/issues/".length)),
+      request,
+      response,
+      authed,
+    );
   }
   if (
     (request.method === "PUT" || request.method === "PATCH") &&
@@ -237,13 +263,22 @@ async function updateIssueRoute(
   context: RequestContext,
 ): Promise<void> {
   const body = await readJson(request);
-  const ifMatch = request.headers["if-match"];
+
+  const immutable = IMMUTABLE_FIELDS.filter((field) => body[field] !== undefined);
+  if (immutable.length > 0) {
+    // These are server-owned. Accepting them would let a client rewrite the
+    // identity of an issue that other files already reference by uid.
+    return respondError(
+      response, 400, "E_IMMUTABLE_FIELD",
+      `These fields cannot be changed: ${immutable.join(", ")}`,
+    );
+  }
 
   try {
     const result = await updateIssue(
       context.writable,
       key,
-      typeof ifMatch === "string" ? ifMatch : null,
+      headerValue(request, "if-match"),
       {
         title: typeof body.title === "string" ? body.title : undefined,
         points: body.points === undefined ? undefined : body.points === null ? null : Number(body.points),
@@ -257,30 +292,94 @@ async function updateIssueRoute(
 
     respondResource(response, 200, result.issue.resource as JsonValue, result.issue.etag);
   } catch (error) {
-    if (error instanceof PreconditionRequiredError) {
-      response.setHeader("ETag", formatEtag(error.currentEtag));
-      return respondError(
-        response, 428, error.code, error.message,
-        `Read the issue first and send its ETag as If-Match.`,
-      );
-    }
-    if (error instanceof PreconditionFailedError) {
-      response.setHeader("ETag", formatEtag(error.currentEtag));
-      // The client keeps its own base, so the server supplies only what it
-      // has: the current document and which fields were refused.
-      return respondJson(response, 412, {
+    return handleWriteError(error, response);
+  }
+}
+
+async function transitionRoute(
+  key: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+
+  try {
+    const result = await transitionIssue(
+      context.writable,
+      key,
+      headerValue(request, "if-match"),
+      { to: String(body.to ?? ""), reason: typeof body.reason === "string" ? body.reason : undefined },
+      actorOf(context),
+      context.user!.role,
+    );
+    respondResource(response, 200, result.issue.resource as JsonValue, result.issue.etag);
+  } catch (error) {
+    if (error instanceof TransitionError) {
+      // 403 when the move exists but this role may not make it; 400 when the
+      // move does not exist at all. Conflating them would tell an ordinary
+      // member to try a transition that will never be allowed.
+      const status = error.code === "E_TRANSITION_FORBIDDEN" ? 403 : 400;
+      return respondJson(response, status, {
         error: { code: error.code, message: error.message, detail: null },
-        etag: error.currentEtag,
-        document: error.document,
-        conflicts: error.conflicts,
+        allowed: error.allowed,
       });
     }
-    if (error instanceof IssueError) {
-      const status = error.code === "E_UNKNOWN_PROJECT" ? 404 : 400;
-      return respondError(response, status, error.code, error.message, error.detail);
-    }
-    throw error;
+    return handleWriteError(error, response);
   }
+}
+
+async function deleteRoute(
+  key: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  try {
+    await deleteIssue(context.writable, key, headerValue(request, "if-match"), actorOf(context));
+    response.writeHead(204).end();
+  } catch (error) {
+    return handleWriteError(error, response);
+  }
+}
+
+function actorOf(context: RequestContext): { id: string; kind: "human" | "agent" } {
+  return {
+    id: context.user!.id,
+    kind: context.user!.role === "agent" ? "agent" : "human",
+  };
+}
+
+function headerValue(request: http.IncomingMessage, name: string): string | null {
+  const value = request.headers[name];
+  return typeof value === "string" ? value : null;
+}
+
+/** Shared mapping so every write route reports a conflict the same way. */
+function handleWriteError(error: unknown, response: http.ServerResponse): void {
+  if (error instanceof PreconditionRequiredError) {
+    response.setHeader("ETag", formatEtag(error.currentEtag));
+    return respondError(
+      response, 428, error.code, error.message,
+      "Read the issue first and send its ETag as If-Match.",
+    );
+  }
+  if (error instanceof PreconditionFailedError) {
+    response.setHeader("ETag", formatEtag(error.currentEtag));
+    return respondJson(response, 412, {
+      error: { code: error.code, message: error.message, detail: null },
+      etag: error.currentEtag,
+      document: error.document,
+      conflicts: error.conflicts,
+    });
+  }
+  if (error instanceof IssueError) {
+    const status = error.code === "E_UNKNOWN_PROJECT" ? 404
+      : error.code === "E_KEY_COLLISION" ? 409
+      : 400;
+    return respondError(response, status, error.code, error.message, error.detail);
+  }
+  throw error;
 }
 
 function showIssueRoute(

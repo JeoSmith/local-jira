@@ -7,6 +7,14 @@ import type { JsonValue } from "../storage/jcs.ts";
 import { findIssue, type IssueDetail, type WritableBoard } from "../storage/board.ts";
 import { fileHash, parseMarkdownResource } from "../storage/resource.ts";
 import { IssueError, MAX_POINTS, type Actor } from "./issue.ts";
+import {
+  allowedTargets,
+  isStatus,
+  requiresAdmin,
+  shouldRecordBlockedFrom,
+  STATUSES,
+  type Status,
+} from "./transition.ts";
 
 /** Fields a plain update may change. Status is deliberately absent (S1-D2). */
 export const UPDATABLE = [
@@ -320,4 +328,229 @@ function ensureNewline(value: string): string {
 function hashOf(contents: string): string {
   // The same function the writer uses, so the CAS compares like with like.
   return fileHash(Buffer.from(contents, "utf8"));
+}
+
+// ── status transitions and deletion (r01b) ──────────────────────────────────
+
+/** Fields the server owns; a request that names one is rejected outright. */
+export const IMMUTABLE_FIELDS = ["uid", "key", "created_at", "created_by_kind"] as const;
+
+export class TransitionError extends Error {
+  readonly code: "E_TRANSITION_NOT_ALLOWED" | "E_TRANSITION_FORBIDDEN" | "E_INVALID_STATUS";
+  readonly allowed: string[];
+
+  constructor(
+    code: TransitionError["code"],
+    message: string,
+    allowed: string[] = [],
+  ) {
+    super(message);
+    this.name = "TransitionError";
+    this.code = code;
+    this.allowed = allowed;
+  }
+}
+
+export interface TransitionInput {
+  to: string;
+  reason?: string;
+}
+
+export async function transitionIssue(
+  writable: WritableBoard,
+  key: string,
+  ifMatch: string | null,
+  input: TransitionInput,
+  actor: Actor,
+  role: string,
+): Promise<UpdateResult> {
+  const board = writable.board;
+  const found = findIssue(board, key);
+  if (found === null || !("issue" in found)) {
+    throw new IssueError("E_UNKNOWN_PROJECT", `No issue with key ${key}`);
+  }
+  const issue = found.issue;
+
+  if (!isStatus(input.to)) {
+    throw new TransitionError(
+      "E_INVALID_STATUS",
+      `"${input.to}" is not a status`,
+      [...STATUSES],
+    );
+  }
+
+  const resource = issue.resource as Record<string, unknown>;
+  const from = String(resource.status ?? "BACKLOG");
+  if (!isStatus(from)) {
+    throw new TransitionError("E_INVALID_STATUS", `The issue holds an unknown status "${from}"`);
+  }
+
+  const blockedFrom = (resource.blocked_from as string | null) ?? null;
+  const targets = allowedTargets(from, blockedFrom);
+
+  if (from === input.to) {
+    return { issue, changed: false };
+  }
+  if (!targets.includes(input.to)) {
+    throw new TransitionError(
+      "E_TRANSITION_NOT_ALLOWED",
+      `${from} → ${input.to} is not a permitted transition`,
+      targets,
+    );
+  }
+  if (requiresAdmin(from, input.to) && role !== "admin") {
+    throw new TransitionError(
+      "E_TRANSITION_FORBIDDEN",
+      `Only an admin may move an issue from ${from} to ${input.to}`,
+      targets,
+    );
+  }
+
+  if (ifMatch === null) {
+    throw new PreconditionRequiredError(issue.etag);
+  }
+  if (normaliseEtag(ifMatch) !== issue.etag) {
+    throw new PreconditionFailedError(issue.etag, issue.resource as JsonValue, {
+      status: { current: from, requested: input.to },
+    });
+  }
+
+  const absolute = path.join(board.boardRoot, issue.path);
+  const original = fs.readFileSync(absolute, "utf8");
+  const patched = patchStatus(original, from, input.to);
+
+  const now = new Date().toISOString().slice(0, 19) + "Z";
+  await writable.writer.write({
+    kind: "update",
+    targetPath: issue.path,
+    contents: patched,
+    expectedHash: hashOf(original),
+    event: buildTransitionEvent(board.localDirectory, issue.uid, key, actor, now, from, input),
+    actorId: actor.id,
+    actorKind: actor.kind,
+  });
+
+  const reread = findIssue(board, key);
+  if (!reread || !("issue" in reread)) {
+    throw new IssueError("E_KEY_COLLISION", `${key} could not be read back`);
+  }
+  return { issue: reread.issue, changed: true };
+}
+
+/**
+ * Moves the status line and maintains `blocked_from`.
+ *
+ * Entering BLOCKED records where the work was so it can resume there; leaving
+ * BLOCKED clears the marker, because a stale one would offer a return path to
+ * a status the issue no longer came from.
+ */
+export function patchStatus(original: string, from: Status, to: Status): string {
+  const match = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n)([\s\S]*)$/.exec(original);
+  if (!match) {
+    throw new IssueError("E_INVALID_TITLE", "The issue file has no frontmatter");
+  }
+
+  let lines = setScalar(match[2].split("\n"), "status", to);
+  lines = shouldRecordBlockedFrom(to)
+    ? setScalar(lines, "blocked_from", from)
+    : removeKey(lines, "blocked_from");
+
+  return `${match[1]}${lines.join("\n")}${match[3]}${match[4]}`;
+}
+
+export async function deleteIssue(
+  writable: WritableBoard,
+  key: string,
+  ifMatch: string | null,
+  actor: Actor,
+): Promise<void> {
+  const board = writable.board;
+  const found = findIssue(board, key);
+  if (found === null || !("issue" in found)) {
+    throw new IssueError("E_UNKNOWN_PROJECT", `No issue with key ${key}`);
+  }
+  const issue = found.issue;
+
+  const children = board.db
+    .prepare("SELECT key FROM issues WHERE parent_uid = ? AND state='OK'")
+    .all(issue.uid) as Array<{ key: string }>;
+  if (children.length > 0) {
+    // r02a owns promote/cascade_cancel; refusing here keeps a parent from
+    // being removed while its children still point at it.
+    throw new IssueError(
+      "E_KEY_COLLISION",
+      `${key} still has ${children.length} child issue(s)`,
+      `Reparent or cancel them first: ${children.map((child) => child.key).join(", ")}`,
+    );
+  }
+
+  if (ifMatch === null) {
+    throw new PreconditionRequiredError(issue.etag);
+  }
+  if (normaliseEtag(ifMatch) !== issue.etag) {
+    throw new PreconditionFailedError(issue.etag, issue.resource as JsonValue, {});
+  }
+
+  const absolute = path.join(board.boardRoot, issue.path);
+  const now = new Date().toISOString().slice(0, 19) + "Z";
+
+  await writable.writer.write({
+    kind: "delete",
+    targetPath: issue.path,
+    contents: null,
+    expectedHash: hashOf(fs.readFileSync(absolute, "utf8")),
+    event: buildDeleteEvent(board.localDirectory, issue.uid, key, actor, now),
+    actorId: actor.id,
+    actorKind: actor.kind,
+  });
+}
+
+function buildTransitionEvent(
+  localDirectory: string,
+  uid: string,
+  key: string,
+  actor: Actor,
+  at: string,
+  from: Status,
+  input: TransitionInput,
+): { eventId: string; path: string; line: string } {
+  const eventId = createUlid();
+  return {
+    eventId,
+    path: `events/${at.slice(0, 10)}/${nodeId(localDirectory)}.jsonl`,
+    line: JSON.stringify({
+      event_id: eventId,
+      at,
+      actor_id: actor.id,
+      actor_kind: actor.kind,
+      target_kind: "issue",
+      target_uid: uid,
+      verb: "issue.transitioned",
+      detail: { key, from, to: input.to, reason: input.reason ?? null },
+    }),
+  };
+}
+
+function buildDeleteEvent(
+  localDirectory: string,
+  uid: string,
+  key: string,
+  actor: Actor,
+  at: string,
+): { eventId: string; path: string; line: string } {
+  const eventId = createUlid();
+  return {
+    eventId,
+    path: `events/${at.slice(0, 10)}/${nodeId(localDirectory)}.jsonl`,
+    line: JSON.stringify({
+      event_id: eventId,
+      at,
+      actor_id: actor.id,
+      actor_kind: actor.kind,
+      target_kind: "issue",
+      target_uid: uid,
+      verb: "issue.deleted",
+      detail: { key },
+    }),
+  };
 }
