@@ -58,11 +58,15 @@ function installStubFlock(
   };
 }
 
-function withPath<T>(dir: string, body: () => T): T {
+async function withPath<T>(dir: string, body: () => T | Promise<T>): Promise<T> {
   const original = process.env.PATH;
   process.env.PATH = `${dir}:${original ?? ""}`;
   try {
-    return body();
+    // Awaited, not just called. Returning the promise from inside `try` runs
+    // the `finally` as soon as the promise exists, which put PATH back before
+    // the code under test had finished using it — so a second `spawn` looked
+    // for the stub after it had already been taken off the path.
+    return await body();
   } finally {
     process.env.PATH = original;
   }

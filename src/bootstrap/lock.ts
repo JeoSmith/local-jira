@@ -221,10 +221,46 @@ class FlockHelperLock implements BootstrapLock {
  * Linux has `flock(2)` but Node exposes no binding for it, so the lock is held
  * by a child process instead: `flock` takes the lock, then execs a command that
  * blocks on stdin. The parent keeps that stdin open. If the parent dies, the
- * pipe closes, the command exits, and the kernel releases the lock — the same
- * crash behaviour as the BSD path.
+ * pipe closes, the command exits, and the kernel releases the lock.
+ *
+ * That release is not instant the way the BSD path's is. There, the lock lives
+ * on a descriptor the dying process owned, so the kernel drops it as the
+ * process goes. Here it lives on a *separate* process that first has to notice
+ * the closed pipe and exit, and under load that wind-down is long enough to
+ * observe: a server restarted straight after a crash would be told another one
+ * is already running, which is false.
+ *
+ * So contention is retried for a short window before it is believed. A holder
+ * that is genuinely alive stays alive across it and is still reported busy; one
+ * that is merely winding down has gone by the time the window closes.
  */
 export function acquireWithFlockHelper(lockPath: string): Promise<BootstrapLock> {
+  return retryWhileBusy(() => attemptFlockHelper(lockPath));
+}
+
+/** How long a refusal may be the previous holder's helper still exiting. */
+const FLOCK_WINDDOWN_MS = 3_000;
+
+async function retryWhileBusy(
+  attempt: () => Promise<BootstrapLock>,
+): Promise<BootstrapLock> {
+  const deadline = Date.now() + FLOCK_WINDDOWN_MS;
+  let delay = 10;
+
+  for (;;) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!(error instanceof BootstrapBusyError) || Date.now() >= deadline) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      delay = Math.min(delay * 2, 200);
+    }
+  }
+}
+
+function attemptFlockHelper(lockPath: string): Promise<BootstrapLock> {
   // flock(1) creates the file itself, under the runner's umask, so it would end
   // up world-readable. Create it here first with the mode the design asks for;
   // the BSD path gets this from open(2) directly.
