@@ -7,6 +7,7 @@ import type { JsonValue } from "../storage/jcs.ts";
 import { findIssue, type IssueDetail, type WritableBoard } from "../storage/board.ts";
 import { fileHash, parseMarkdownResource } from "../storage/resource.ts";
 import {
+  ISSUE_TYPES,
   IssueError,
   MAX_POINTS,
   projectTimezone,
@@ -14,8 +15,10 @@ import {
   timestamp,
   type AcceptanceInput,
   type Actor,
+  type IssueType,
 } from "./issue.ts";
 import { buildEvent } from "./events.ts";
+import { canHaveChildren, childrenOf, validateParent } from "./hierarchy.ts";
 import {
   allowedTargets,
   isStatus,
@@ -32,6 +35,7 @@ export const UPDATABLE = [
   "labels",
   "assignee",
   "acceptance",
+  "parent",
   "description",
 ] as const;
 export type UpdatableField = (typeof UPDATABLE)[number];
@@ -42,6 +46,8 @@ export interface UpdateIssueInput {
   labels?: string[];
   assignee?: string | null;
   acceptance?: AcceptanceInput[];
+  /** uid of the parent, or null to detach. */
+  parent?: string | null;
   description?: string;
   /** Rejected if present — transitions have their own endpoint. */
   status?: string;
@@ -128,6 +134,11 @@ export async function updateIssue(
     );
   }
 
+  if (input.parent !== undefined && input.parent !== null) {
+    const type = String((issue.resource as Record<string, unknown>).type ?? "");
+    validateParent(board, requireKnownType(type), issue.uid, input.parent);
+  }
+
   const absolute = path.join(board.boardRoot, issue.path);
   const original = fs.readFileSync(absolute, "utf8");
   const patched = patchIssueFile(original, input);
@@ -205,6 +216,11 @@ export function patchIssueFile(original: string, input: UpdateIssueInput): strin
     lines = labels.length === 0
       ? removeKey(lines, "labels")
       : setScalar(lines, "labels", `[${labels.map(yamlScalar).join(", ")}]`);
+  }
+  if (input.parent !== undefined) {
+    lines = input.parent === null
+      ? removeKey(lines, "parent")
+      : setScalar(lines, "parent", input.parent);
   }
   if (input.acceptance !== undefined) {
     lines = setBlock(lines, "acceptance", renderAcceptance(normaliseAcceptance(input.acceptance)));
@@ -360,6 +376,13 @@ function normaliseEtag(value: string): string {
     return "";
   }
   return trimmed.replace(/^"(.*)"$/, "$1");
+}
+
+function requireKnownType(value: string): IssueType {
+  if (!(ISSUE_TYPES as readonly string[]).includes(value)) {
+    throw new IssueError("E_INVALID_TYPE", `"${value}" is not an issue type`);
+  }
+  return value as IssueType;
 }
 
 function requireTitle(value: string): string {
@@ -551,11 +574,26 @@ export function patchStatus(original: string, from: Status, to: Status): string 
   return `${match[1]}${lines.join("\n")}${match[3]}${match[4]}`;
 }
 
+export type DeleteStrategy = "promote" | "cascade_cancel";
+
+export class ChildrenPresentError extends Error {
+  readonly code = "E_CHILDREN_PRESENT";
+  readonly children: string[];
+  readonly strategies: DeleteStrategy[] = ["promote", "cascade_cancel"];
+
+  constructor(key: string, children: string[]) {
+    super(`${key} still has ${children.length} child issue(s).`);
+    this.name = "ChildrenPresentError";
+    this.children = children;
+  }
+}
+
 export async function deleteIssue(
   writable: WritableBoard,
   key: string,
   ifMatch: string | null,
   actor: Actor,
+  strategy: DeleteStrategy | null = null,
 ): Promise<void> {
   const board = writable.board;
   const found = findIssue(board, key);
@@ -564,17 +602,29 @@ export async function deleteIssue(
   }
   const issue = found.issue;
 
-  const children = board.db
-    .prepare("SELECT key FROM issues WHERE parent_uid = ? AND state='OK'")
-    .all(issue.uid) as Array<{ key: string }>;
+  const children = childrenOf(board, issue.uid);
   if (children.length > 0) {
-    // r02a owns promote/cascade_cancel; refusing here keeps a parent from
-    // being removed while its children still point at it.
-    throw new IssueError(
-      "E_KEY_COLLISION",
-      `${key} still has ${children.length} child issue(s)`,
-      `Reparent or cancel them first: ${children.map((child) => child.key).join(", ")}`,
-    );
+    if (strategy === null) {
+      // Refusing by default rather than picking one: both strategies are
+      // destructive in different ways, and which one is right is a judgement
+      // about the work, not about the data (§5.1).
+      throw new ChildrenPresentError(key, children.map((child) => child.key));
+    }
+    if (strategy === "promote") {
+      // A subtask without a parent is a shape the create path rejects outright,
+      // so producing one here would leave the index holding something the API
+      // could never have made — and R11 would later quarantine it.
+      const subtasks = children.filter((child) => child.type === "subtask");
+      if (subtasks.length > 0) {
+        throw new IssueError(
+          "E_STRATEGY_IMPOSSIBLE",
+          `promote would leave ${subtasks.length} subtask(s) without a parent, which §5.1 forbids.`,
+          `Use strategy=cascade_cancel, or reparent first: ${subtasks
+            .map((child) => child.key)
+            .join(", ")}`,
+        );
+      }
+    }
   }
 
   if (ifMatch === null) {
@@ -586,6 +636,26 @@ export async function deleteIssue(
 
   const absolute = path.join(board.boardRoot, issue.path);
   const now = timestamp(projectTimezone(board, issue.project));
+
+  // Children first. If the run stops partway the parent is still there holding
+  // them, which is recoverable; doing it the other way round would orphan them
+  // with nothing left pointing at what they belonged to.
+  for (const child of children) {
+    if (strategy === "promote") {
+      await updateIssue(writable, child.key, currentEtagOf(board, child.key), { parent: null }, actor);
+    } else if (strategy === "cascade_cancel" && child.status !== "CANCELLED") {
+      // Admin, because §5.2 lets only an admin revive from CANCELLED and the
+      // cascade must be able to make the move regardless of who asked.
+      await transitionIssue(
+        writable,
+        child.key,
+        currentEtagOf(board, child.key),
+        { to: "CANCELLED", reason: `parent ${key} deleted` },
+        actor,
+        "admin",
+      );
+    }
+  }
 
   await writable.writer.write({
     kind: "delete",
@@ -604,6 +674,15 @@ export async function deleteIssue(
     actorId: actor.id,
     actorKind: actor.kind,
   });
+}
+
+/** The live ETag, so a cascade can supply its own preconditions. */
+function currentEtagOf(board: WritableBoard["board"], key: string): string {
+  const found = findIssue(board, key);
+  if (!found || !("issue" in found)) {
+    throw new IssueError("E_UNKNOWN_PROJECT", `No issue with key ${key}`);
+  }
+  return found.issue.etag;
 }
 
 /** The named fields only, so a diff shows what the request actually touched. */

@@ -8,6 +8,7 @@ import { AuthorizationError, require as requireCapability, type Capability } fro
 import { CredentialStore } from "../auth/credentials.ts";
 import { createIssue, IssueError } from "../domain/issue.ts";
 import {
+  ChildrenPresentError,
   deleteIssue,
   IMMUTABLE_FIELDS,
   PreconditionFailedError,
@@ -15,6 +16,7 @@ import {
   transitionIssue,
   TransitionError,
   updateIssue,
+  type DeleteStrategy,
 } from "../domain/update.ts";
 import {
   authenticate,
@@ -27,6 +29,7 @@ import {
   type UserRecord,
 } from "../domain/users.ts";
 import { buildEvent, redact } from "../domain/events.ts";
+import { childrenOf } from "../domain/hierarchy.ts";
 import { canonicalJson, type JsonValue } from "../storage/jcs.ts";
 import {
   findIssue,
@@ -288,7 +291,11 @@ async function handle(
     );
   }
   if (request.method === "GET" && url.pathname.startsWith("/issues/")) {
-    return showIssueRoute(decodeURIComponent(url.pathname.slice("/issues/".length)), response, authed);
+    const rest = decodeURIComponent(url.pathname.slice("/issues/".length));
+    if (rest.endsWith("/children")) {
+      return childrenRoute(rest.slice(0, -"/children".length), response, authed);
+    }
+    return showIssueRoute(rest, response, authed);
   }
 
   respondError(response, 404, "E_NOT_FOUND", `No route for ${route}`);
@@ -381,6 +388,7 @@ async function createIssueRoute(
         description: typeof body.description === "string" ? body.description : undefined,
         points: body.points === undefined || body.points === null ? null : Number(body.points),
         assignee: typeof body.assignee === "string" ? body.assignee : null,
+        parent: typeof body.parent === "string" ? body.parent : null,
         labels: Array.isArray(body.labels) ? body.labels.map(String) : [],
         acceptance: Array.isArray(body.acceptance)
           ? body.acceptance.map((item) =>
@@ -431,6 +439,7 @@ async function updateIssueRoute(
         points: body.points === undefined ? undefined : body.points === null ? null : Number(body.points),
         labels: Array.isArray(body.labels) ? body.labels.map(String) : undefined,
         assignee: body.assignee === undefined ? undefined : (body.assignee as string | null),
+        parent: body.parent === undefined ? undefined : (body.parent as string | null),
         acceptance: Array.isArray(body.acceptance)
           ? body.acceptance.map((item) =>
               typeof item === "string"
@@ -501,7 +510,21 @@ async function deleteRoute(
   try {
     const found = findIssue(context.board, key);
     const uid = found && "issue" in found ? found.issue.uid : null;
-    await deleteIssue(context.writable, key, headerValue(request, "if-match"), actorOf(context));
+    const requested = new URL(request.url ?? "/", "http://localhost").searchParams.get("strategy");
+    if (requested !== null && requested !== "promote" && requested !== "cascade_cancel") {
+      return respondError(
+        response, 400, "E_INVALID_STRATEGY",
+        `"${requested}" is not a deletion strategy.`,
+        "Use strategy=promote or strategy=cascade_cancel.",
+      );
+    }
+    await deleteIssue(
+      context.writable,
+      key,
+      headerValue(request, "if-match"),
+      actorOf(context),
+      requested as DeleteStrategy | null,
+    );
     publishIssueChange(context, key, uid, "deleted");
     response.writeHead(204).end();
   } catch (error) {
@@ -669,13 +692,44 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
       conflicts: error.conflicts,
     });
   }
+  if (error instanceof ChildrenPresentError) {
+    // The caller has to choose, so the response carries everything the choice
+    // needs: which children, and what the options are called.
+    return respondJson(response, 409, {
+      error: { code: error.code, message: error.message, detail: null },
+      children: error.children,
+      strategies: error.strategies,
+    });
+  }
   if (error instanceof IssueError) {
     const status = error.code === "E_UNKNOWN_PROJECT" ? 404
       : error.code === "E_KEY_COLLISION" ? 409
+      : error.code === "E_STRATEGY_IMPOSSIBLE" ? 409
       : 400;
     return respondError(response, status, error.code, error.message, error.detail);
   }
   throw error;
+}
+
+/**
+ * The children of an issue, as their own resource.
+ *
+ * Deliberately not folded into the issue body. That body is the file's
+ * representation and its hash is the ETag (ADR-003), so including a derived
+ * list would make an issue's validator change whenever some *other* issue was
+ * reparented onto it — an If-Match conflict caused by an edit the caller never
+ * made and cannot see.
+ */
+function childrenRoute(
+  key: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const found = findIssue(context.board, key);
+  if (found === null || !("issue" in found)) {
+    return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
+  }
+  respondJson(response, 200, { children: childrenOf(context.board, found.issue.uid) });
 }
 
 function showIssueRoute(
@@ -711,6 +765,13 @@ function showIssueRoute(
       `${key} matches more than one issue`,
       found.ambiguous.join(", "),
     );
+  }
+
+  // A count, so a detail screen knows whether to ask for the list at all. The
+  // list itself is /issues/{key}/children — see there for why it is not inlined.
+  const children = childrenOf(context.board, found.issue.uid);
+  if (children.length > 0) {
+    response.setHeader("X-Child-Count", String(children.length));
   }
 
   // ADR-003: the ETag is the hash of the bytes actually sent, so a single

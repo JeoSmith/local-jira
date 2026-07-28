@@ -7,6 +7,7 @@ import type { BoardHandle, WritableBoard } from "../storage/board.ts";
 import { findIssue, type IssueDetail } from "../storage/board.ts";
 import { issuePath } from "../storage/layout.ts";
 import { buildEvent } from "./events.ts";
+import { validateParent } from "./hierarchy.ts";
 
 export const ISSUE_TYPES = [
   "epic",
@@ -30,7 +31,12 @@ export type IssueErrorCode =
   | "E_INVALID_POINTS"
   | "E_STATUS_NOT_ALLOWED"
   | "E_INVALID_LABEL"
-  | "E_KEY_COLLISION";
+  | "E_KEY_COLLISION"
+  | "E_PARENT_NOT_ALLOWED"
+  | "E_PARENT_NOT_FOUND"
+  | "E_PARENT_CYCLE"
+  | "E_CHILDREN_PRESENT"
+  | "E_STRATEGY_IMPOSSIBLE";
 
 export class IssueError extends Error {
   readonly code: IssueErrorCode;
@@ -58,6 +64,8 @@ export interface CreateIssueInput {
   points?: number | null;
   assignee?: string | null;
   acceptance?: AcceptanceInput[];
+  /** uid of the parent issue. Checked against the type rules in §5.1. */
+  parent?: string | null;
   /** Rejected if present — see S1-D1. Accepted as a parameter only to say so. */
   status?: string;
 }
@@ -89,6 +97,12 @@ export async function createIssue(
     );
   }
 
+  // Before a uid is minted, so a rejected parent leaves no key consumed.
+  const parent =
+    input.parent === undefined || input.parent === null
+      ? null
+      : validateParent(board, type, null, input.parent);
+
   const uid = createUlid();
   const key = allocateKey(board, project.key);
   const now = timestamp(project.timezone);
@@ -112,6 +126,7 @@ export async function createIssue(
     labels,
     assignee: input.assignee ?? null,
     acceptance: input.acceptance ?? [],
+    parent: parent?.uid ?? null,
     createdAt: now,
     createdByKind: actor.kind,
     description: input.description ?? "",
@@ -256,6 +271,7 @@ interface RenderInput {
   labels: string[];
   assignee: string | null;
   acceptance: AcceptanceInput[];
+  parent: string | null;
   createdAt: string;
   createdByKind: Actor["kind"];
   description: string;
@@ -294,6 +310,9 @@ export function renderIssueFile(input: RenderInput): string {
     `status: ${INITIAL_STATUS}`,
   ];
 
+  if (input.parent) {
+    lines.push(`parent: ${input.parent}`);
+  }
   if (input.assignee) {
     lines.push(`assignee: ${yamlScalar(input.assignee)}`);
   }
