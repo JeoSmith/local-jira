@@ -341,6 +341,30 @@ test("expires a session and slides a live one forward", (t) => {
 
 // ── HTTP surface ────────────────────────────────────────────────────────────
 
+test("serves the board shell and allowlisted assets before authentication", async (t) => {
+  const sandbox = makeSandbox(t);
+
+  await withServer(sandbox, async (server) => {
+    const page = await fetch(server.url);
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type") ?? "", /^text\/html/);
+    assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'self'/);
+    assert.match(await page.text(), /id="board"/);
+
+    const script = await fetch(`${server.url}/app.js`);
+    assert.equal(script.status, 200);
+    assert.match(script.headers.get("content-type") ?? "", /^text\/javascript/);
+    assert.match(await script.text(), /new EventSource\("\/stream"\)/);
+
+    const style = await fetch(`${server.url}/app.css`);
+    assert.equal(style.status, 200);
+    assert.match(style.headers.get("content-type") ?? "", /^text\/css/);
+
+    const unknown = await fetch(`${server.url}/src/server/http.ts`);
+    assert.equal(unknown.status, 401, "only explicitly allowlisted assets are public");
+  });
+});
+
 test("refuses every domain route before bootstrap", async (t) => {
   const sandbox = makeSandbox(t);
 

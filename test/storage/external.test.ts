@@ -301,9 +301,15 @@ test("indexes an op appended to a comment log without touching the original", as
 function openStream(
   session: Session,
   headers: Record<string, string> = {},
-): { text(): string; wait(marker: string, timeoutMs: number): Promise<string>; close(): void } {
+): {
+  text(): string;
+  wait(marker: string, timeoutMs: number): Promise<string>;
+  waitForClose(timeoutMs: number): Promise<void>;
+  close(): void;
+} {
   const url = new URL(`${session.server.url}/stream`);
   let received = "";
+  let ended = false;
 
   const request = http.get(
     {
@@ -316,6 +322,9 @@ function openStream(
       response.setEncoding("utf8");
       response.on("data", (chunk: string) => {
         received += chunk;
+      });
+      response.on("end", () => {
+        ended = true;
       });
     },
   );
@@ -332,9 +341,37 @@ function openStream(
       }
       throw new Error(`did not see "${marker}" in ${timeoutMs}ms. Got: ${received}`);
     },
+    async waitForClose(timeoutMs) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (ended) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error(`stream remained open for ${timeoutMs}ms`);
+    },
     close: () => request.destroy(),
   };
 }
+
+test("pushes API changes and closes the stream on logout", async (t) => {
+  const sandbox = await makeSandbox(t);
+  const session = await signIn(sandbox, { watch: false });
+  const stream = openStream(session);
+  t.after(() => stream.close());
+  t.after(() => session.server.close());
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const created = await call(session, "POST", "/issues", {
+    body: { project: "LJ", type: "story", title: "API 실시간 반영" },
+  });
+  const message = await stream.wait("event: issue.changed", 1_000);
+  assert.match(message, new RegExp(String(created.json.key)));
+  assert.match(message, /"source":"api"/);
+  assert.match(message, /"action":"created"/);
+
+  await call(session, "POST", "/auth/logout");
+  await stream.waitForClose(1_000);
+});
 
 test("pushes an external change to a connected client within 3 seconds", async (t) => {
   const sandbox = await makeSandbox(t);
