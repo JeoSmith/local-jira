@@ -192,16 +192,29 @@ function main(): void {
   // This is the one that was actually wrong: the document announced Wave 2 as
   // passed while every story in it was still a draft with 0 of 68 boxes ticked.
   for (const wave of waves) {
+    const members = wave.stories
+      .map((id) => stories.get(id))
+      .filter((story): story is Story => story !== undefined);
+
+    // A wave in progress may hold finished stories — that is what progress
+    // looks like. The two claims worth checking are the absolute ones: a wave
+    // called complete has nothing unfinished in it, and a wave with nothing
+    // unfinished has been called complete.
+    if (wave.complete) {
+      for (const story of members.filter((entry) => entry.status !== "done")) {
+        fail(`Wave ${wave.number}는 완료로 표시됐는데 ${story.file}의 status가 "${story.status}"입니다.`);
+      }
+    } else if (members.length > 0 && members.every((story) => story.status === "done")) {
+      fail(
+        `Wave ${wave.number}의 스토리가 모두 done인데 웨이브가 완료로 표시되지 않았습니다. ` +
+          "진행 현황 표와 진행 점수를 갱신하세요.",
+      );
+    }
+
     for (const id of wave.stories) {
       const story = stories.get(id);
       if (!story) {
         continue;
-      }
-      if (wave.complete && story.status !== "done") {
-        fail(`Wave ${wave.number}는 완료로 표시됐는데 ${story.file}의 status가 "${story.status}"입니다.`);
-      }
-      if (!wave.complete && story.status === "done") {
-        fail(`${story.file}은 done인데 Wave ${wave.number}는 완료로 표시되지 않았습니다.`);
       }
       // A finished story may leave criteria open only by naming where each went.
       if (story.status === "done" && story.ticked + story.carried !== story.total) {

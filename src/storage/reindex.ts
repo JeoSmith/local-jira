@@ -32,7 +32,7 @@ export interface ReindexStats {
 }
 
 /** Ordered so that a comment's body row exists before its ops are replayed. */
-const LOAD_ORDER: FileIdentity["kind"][] = [
+export const LOAD_ORDER: FileIdentity["kind"][] = [
   "config",
   "users",
   "project",
@@ -44,6 +44,118 @@ const LOAD_ORDER: FileIdentity["kind"][] = [
   "proposal",
   "event",
 ];
+
+/**
+ * How long a vanished file may still turn out to be a move.
+ *
+ * A rename reaches the watcher as a delete and a create with nothing linking
+ * them, and on a `git checkout` the two can be seconds apart. Deleting the
+ * entity on sight would drop its links and history and then recreate it as a
+ * stranger (PRD §5.5).
+ */
+export const DELETE_GRACE_MS = 60_000;
+
+export interface RetireOptions {
+  now: number;
+  graceMs: number;
+}
+
+export interface Retired {
+  outcome: "moved" | "tombstoned" | "cleared";
+  path: string;
+  uid: string | null;
+  key: string | null;
+  to: string | null;
+}
+
+/**
+ * Retires the index rows for a file that is no longer on disk.
+ *
+ * The one place that decides what a vanished file means, so the incremental
+ * pass and the full pass cannot disagree. They used to: the incremental pass
+ * deleted the row outright, which meant whether a deletion kept its history
+ * depended on which trigger happened to notice it first.
+ *
+ * An issue whose uid is live at another path has moved, not gone. Otherwise it
+ * becomes a tombstone: the row survives, hidden from every query by the
+ * `state='OK'` filter, until the grace period makes the deletion credible.
+ */
+export function retirePath(
+  db: DatabaseSync,
+  knownPath: string,
+  identity: FileIdentity,
+  options: RetireOptions,
+): Retired {
+  if (identity.kind !== "issue") {
+    // Nothing else carries history that outlives its file.
+    clearFile(db, identity);
+    db.prepare("DELETE FROM file_state WHERE path = ?").run(knownPath);
+    return { outcome: "cleared", path: knownPath, uid: null, key: null, to: null };
+  }
+
+  const issue = db
+    .prepare("SELECT uid, key FROM issues WHERE path = ?")
+    .get(knownPath) as { uid: string; key: string | null } | undefined;
+
+  const moved = issue
+    ? (db
+        .prepare("SELECT path FROM issues WHERE uid = ? AND path != ? AND state = 'OK'")
+        .get(issue.uid, knownPath) as { path: string } | undefined)
+    : undefined;
+
+  if (!issue || moved) {
+    clearFile(db, identity);
+    db.prepare("DELETE FROM file_state WHERE path = ?").run(knownPath);
+    return {
+      outcome: moved ? "moved" : "cleared",
+      path: knownPath,
+      uid: issue?.uid ?? null,
+      key: issue?.key ?? null,
+      to: moved?.path ?? null,
+    };
+  }
+
+  db.prepare(
+    `UPDATE issues SET state = 'PENDING_DELETE', delete_deadline_at = ?
+      WHERE path = ? AND state != 'PENDING_DELETE'`,
+  ).run(options.now + options.graceMs, knownPath);
+  db.prepare("DELETE FROM issues_fts WHERE uid = ?").run(issue.uid);
+  db.prepare("DELETE FROM file_state WHERE path = ?").run(knownPath);
+
+  return { outcome: "tombstoned", path: knownPath, uid: issue.uid, key: issue.key, to: null };
+}
+
+/**
+ * Cancels tombstones for a uid that has just reappeared at `relative`.
+ *
+ * Only inside the grace period: past it the deletion has been announced, and
+ * un-announcing it would be a worse lie than a late one.
+ */
+export function reviveMoved(
+  db: DatabaseSync,
+  relative: string,
+  now: number,
+): Array<{ from: string; key: string | null; uid: string }> {
+  const row = db
+    .prepare("SELECT uid FROM issues WHERE path = ? AND state = 'OK'")
+    .get(relative) as { uid: string } | undefined;
+  if (!row) {
+    return [];
+  }
+
+  const stale = db
+    .prepare(
+      `SELECT path, key FROM issues
+        WHERE uid = ? AND path != ? AND state = 'PENDING_DELETE'
+          AND delete_deadline_at IS NOT NULL AND delete_deadline_at > ?`,
+    )
+    .all(row.uid, relative, now) as Array<{ path: string; key: string | null }>;
+
+  for (const entry of stale) {
+    db.prepare("DELETE FROM issues WHERE path = ?").run(entry.path);
+  }
+  return stale.map((entry) => ({ from: entry.path, key: entry.key, uid: row.uid }));
+}
 
 export function scanBoard(boardRoot: string): ScannedFile[] {
   const found: ScannedFile[] = [];
@@ -126,7 +238,7 @@ export function rebuildIndex(
         const hash = fileHash(bytes);
         stats.hashed += 1;
 
-        if (loadFile(built, file, bytes, hash, stats)) {
+        if (loadScannedFile(built, file, bytes, hash, stats)) {
           stats.parsed += 1;
         }
       }
@@ -210,21 +322,29 @@ export function incrementalSync(
 
         clearFile(db, file.identity);
         (stats.changed ??= []).push(file.identity.path);
-        if (loadFile(db, file, bytes, hash, stats)) {
+        if (loadScannedFile(db, file, bytes, hash, stats)) {
           stats.parsed += 1;
         }
       }
     }
 
+    const now = Date.now();
     for (const knownPath of known.keys()) {
       if (!seen.has(knownPath)) {
         const identity = classify(knownPath);
         if (identity) {
-          clearFile(db, identity);
+          retirePath(db, knownPath, identity, { now, graceMs: DELETE_GRACE_MS });
+        } else {
+          db.prepare("DELETE FROM file_state WHERE path = ?").run(knownPath);
         }
-        db.prepare("DELETE FROM file_state WHERE path = ?").run(knownPath);
         stats.removed += 1;
       }
+    }
+
+    // A file that moved shows up here as a change; cancel any tombstone the
+    // same pass just created for its old path.
+    for (const relative of stats.changed ?? []) {
+      reviveMoved(db, relative, now);
     }
 
     db.exec("COMMIT");
@@ -237,7 +357,7 @@ export function incrementalSync(
   return stats;
 }
 
-function loadFile(
+export function loadScannedFile(
   db: DatabaseSync,
   file: ScannedFile,
   bytes: Buffer,
@@ -291,7 +411,7 @@ function loadFile(
 }
 
 /** Removes everything a file contributed, so a reload cannot leave residue. */
-function clearFile(db: DatabaseSync, identity: FileIdentity): void {
+export function clearFile(db: DatabaseSync, identity: FileIdentity): void {
   db.prepare("DELETE FROM index_errors WHERE path = ?").run(identity.path);
 
   switch (identity.kind) {
@@ -352,19 +472,21 @@ export function syncPath(
     scanned: 1, parsed: 0, hashed: 0, removed: 0, failed: 0, durationMs: 0,
   };
 
-  clearFile(db, identity);
-
   let stat: fs.Stats;
   try {
     stat = fs.statSync(absolute);
   } catch {
-    // Deleted: the entity rows are gone, so drop the tracking row too.
-    db.prepare("DELETE FROM file_state WHERE path = ?").run(relativePath);
+    // Deleted through the API. Same policy as a deletion noticed by a scan: the
+    // row becomes a tombstone rather than vanishing, so the history survives and
+    // a later lookup can still say where the file was (r01b, r08c).
+    retirePath(db, relativePath, identity, { now: Date.now(), graceMs: DELETE_GRACE_MS });
     return;
   }
 
+  clearFile(db, identity);
+
   const bytes = fs.readFileSync(absolute);
-  loadFile(
+  loadScannedFile(
     db,
     {
       identity,

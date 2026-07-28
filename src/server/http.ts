@@ -35,7 +35,8 @@ import {
   type BoardHandle,
   type WritableBoard,
 } from "../storage/board.ts";
-import { reconcileExternal } from "../storage/external.ts";
+import { reconcileExternal, reconcileFull } from "../storage/external.ts";
+import { findTombstone, type ReconcileReason } from "../storage/reconcile.ts";
 import { watchBoard, type BoardWatcher } from "../storage/watcher.ts";
 import { formatEtag } from "../storage/resource.ts";
 import { EventStream } from "./stream.ts";
@@ -93,9 +94,13 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   // Reconciliation is serialised: two overlapping scans would race on the same
   // index rows, and the watcher can easily fire again while one is running.
   let reconciling: Promise<void> = Promise.resolve();
-  const reconcile = (): Promise<void> => {
+  const reconcile = (escalation: ReconcileReason | null = null): Promise<void> => {
     reconciling = reconciling.then(async () => {
-      const result = await reconcileExternal(writable);
+      const result =
+        escalation === null
+          ? await reconcileExternal(writable)
+          : await reconcileFull(writable, escalation);
+
       for (const change of result.changed) {
         stream.publish({
           type: "issue.changed",
@@ -105,15 +110,39 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
       if (result.removed > 0) {
         stream.publish({ type: "index.state", data: { removed: result.removed } });
       }
+
+      if ("report" in result) {
+        const { report } = result;
+        // A full pass is rare and expensive, so it says why it ran and what it
+        // cost. Without the reason a log of these is unreadable: they all look
+        // the same and none of them explain themselves.
+        process.stdout.write(
+          `localjira: reconciled (${report.reason}) — scanned ${report.scanned}, ` +
+            `hashed ${report.hashed}, changed ${report.changed.length}, ` +
+            `moved ${report.renamed.length}, tombstoned ${report.tombstoned.length}, ` +
+            `deleted ${report.confirmed.length}, ${report.durationMs}ms\n`,
+        );
+        for (const moved of report.renamed) {
+          stream.publish({
+            type: "issue.changed",
+            data: { key: moved.key, uid: moved.uid, path: moved.to, source: "moved" },
+          });
+        }
+      }
     }, () => undefined);
     return reconciling;
   };
+
+  // Startup is a full pass: whatever happened while the server was down left no
+  // events behind, and a pull or a branch switch is exactly what tends to
+  // happen in that window.
+  await reconcile("startup");
 
   let watcher: BoardWatcher | null = null;
   if (options.watch !== false) {
     watcher = watchBoard(board.boardRoot, {
       debounceMs: options.debounceMs,
-      onBatch: () => void reconcile(),
+      onBatch: (_paths, escalation) => void reconcile(escalation),
       onError: (error) =>
         process.stderr.write(`localjira: watcher error: ${error.message}\n`),
     });
@@ -657,6 +686,21 @@ function showIssueRoute(
   const found = findIssue(context.board, key);
 
   if (found === null) {
+    // A tombstone still answers, because "it was here and it is gone" is a
+    // different and more useful answer than "never heard of it" — especially
+    // after a pull, where the caller's next question is which file went away.
+    const tombstone = findTombstone(context.board.db, key);
+    if (tombstone) {
+      return respondError(
+        response,
+        404,
+        "E_ISSUE_NOT_FOUND",
+        `${key} is no longer on the board.`,
+        tombstone.pending
+          ? `Last seen at ${tombstone.path}; still within the grace period in case it was moved.`
+          : `Last seen at ${tombstone.path}.`,
+      );
+    }
     return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
   }
   if ("ambiguous" in found) {

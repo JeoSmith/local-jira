@@ -1,11 +1,11 @@
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 
 import { BootstrapError } from "../bootstrap/execute.ts";
 import { acquireLock, type BootstrapLock } from "../bootstrap/lock.ts";
 import { resolveRepositoryContext } from "../bootstrap/inspect.ts";
-import { getMeta, openIndex } from "./index-db.ts";
+import { getMeta, INDEX_FILENAME, openIndex } from "./index-db.ts";
 import { LOCAL_DIRECTORY } from "./layout.ts";
 import { Outbox } from "./outbox.ts";
 import { incrementalSync, rebuildIndex, type ReindexStats } from "./reindex.ts";
@@ -101,6 +101,19 @@ export function openBoard(
 
   const boardRoot = context.boardPath;
   if (!fs.existsSync(path.join(boardRoot, "config.yaml"))) {
+    // An index that remembers files, next to a board directory that has none,
+    // is not an uninitialised repository — it is a board whose worktree was
+    // removed. Telling those apart matters because the advice is opposite:
+    // `init` would start over, discarding nothing visible but losing the link
+    // to the data branch that still holds everything (ADR-006).
+    if (indexRemembersFiles(path.join(boardRoot, LOCAL_DIRECTORY))) {
+      throw new BootstrapError(
+        "E_WORKTREE_MISSING",
+        `The board worktree at ${boardRoot} is gone, but its index still lists files.`,
+        "The data is safe on the localjira/data branch. Run localjira repair-worktree " +
+          "to check it out again — do not run init, which would start a new board.",
+      );
+    }
     throw new BootstrapError(
       "E_BOARD_NOT_INITIALIZED",
       `No board found at ${boardRoot}.`,
@@ -126,6 +139,31 @@ export function openBoard(
     reason: "ok",
     stats,
   });
+}
+
+/**
+ * True when the index still lists board files.
+ *
+ * Read directly rather than through `openIndex` because opening would migrate
+ * or rebuild, and rebuilding against an empty worktree is precisely the outcome
+ * this check exists to prevent.
+ */
+function indexRemembersFiles(localDirectory: string): boolean {
+  const indexPath = path.join(localDirectory, INDEX_FILENAME);
+  if (!fs.existsSync(indexPath)) {
+    return false;
+  }
+  let db: DatabaseSync | null = null;
+  try {
+    db = new DatabaseSync(indexPath, { readOnly: true });
+    const row = db.prepare("SELECT COUNT(*) c FROM file_state").get() as { c: number };
+    return row.c > 0;
+  } catch {
+    // Unreadable or too old to have the table: it cannot be evidence either way.
+    return false;
+  } finally {
+    db?.close();
+  }
 }
 
 function handle(

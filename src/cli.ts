@@ -35,6 +35,7 @@ import {
   type IssueDetail,
   type IssueSummary,
 } from "./storage/board.ts";
+import { reconcileFull } from "./storage/external.ts";
 
 const USAGE = `Usage:
   localjira doctor [--json]
@@ -42,7 +43,7 @@ const USAGE = `Usage:
                  [--remote <NAME>] [--push] [--json]
   localjira repair-worktree [--remote <NAME>] [--json]
 
-  localjira index status [--json]
+  localjira index status|rebuild|reconcile [--json]
   localjira index rebuild [--json]
   localjira issue list [--project <KEY>] [--status <STATUS>] [--limit <N>] [--json]
   localjira issue show <KEY> [--json]
@@ -69,7 +70,7 @@ try {
       await runRepairCommand(argv);
       break;
     case "index":
-      runIndexCommand(argv);
+      await runIndexCommand(argv);
       break;
     case "issue":
       await runIssueCommand(argv);
@@ -151,8 +152,11 @@ async function runRepairCommand(args: string[]): Promise<void> {
   report(result, options.flags.has("--json"));
 }
 
-function runIndexCommand(args: string[]): void {
+async function runIndexCommand(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
+  if (sub === "reconcile") {
+    return runReconcileCommand(rest);
+  }
   if (sub !== "status" && sub !== "rebuild") {
     process.stderr.write(USAGE);
     process.exitCode = 2;
@@ -171,6 +175,43 @@ function runIndexCommand(args: string[]): void {
     process.exitCode = status.errors.length > 0 ? 1 : 0;
   } finally {
     board.close();
+  }
+}
+
+/**
+ * Reconciles the whole board on demand.
+ *
+ * The safety net under the watcher: after a pull on a machine whose watcher was
+ * not running, or when someone simply wants to be sure, this is the same full
+ * pass the server runs on startup — reason `manual` so the log says who asked.
+ */
+async function runReconcileCommand(args: string[]): Promise<void> {
+  const options = parseArgs(args, new Set(), new Set(["--json"]));
+  const writable = await openBoardForWriting(process.cwd());
+
+  try {
+    const { report } = await reconcileFull(writable, "manual");
+    if (options.flags.has("--json")) {
+      write(JSON.stringify(report, null, 2));
+      return;
+    }
+    write(
+      `reconciled (${report.reason})\n` +
+        `  scanned    ${report.scanned} file(s), hashed ${report.hashed}\n` +
+        `  changed    ${report.changed.length}\n` +
+        `  moved      ${report.renamed.length}\n` +
+        `  tombstoned ${report.tombstoned.length}\n` +
+        `  deleted    ${report.confirmed.length}\n` +
+        `  took       ${report.durationMs}ms`,
+    );
+    for (const gone of report.tombstoned) {
+      write(`  - ${gone.key ?? gone.uid} disappeared (${gone.path})`);
+    }
+    for (const moved of report.renamed) {
+      write(`  - ${moved.key ?? moved.uid} moved ${moved.from} -> ${moved.to}`);
+    }
+  } finally {
+    await writable.close();
   }
 }
 

@@ -296,7 +296,7 @@ test("refreshes the stat cache when metadata moves but content does not", (t) =>
   assert.equal(stats.parsed, 0, "identical content is not reparsed");
 });
 
-test("drops records whose file disappeared", (t) => {
+test("tombstones an issue whose file disappeared", (t) => {
   const board = makeBoard(t);
   seed(board);
   const { db } = rebuild(board);
@@ -306,7 +306,14 @@ test("drops records whose file disappeared", (t) => {
   const stats = incrementalSync(board.root, db);
 
   assert.equal(stats.removed, 1);
-  assert.equal(db.prepare("SELECT COUNT(*) c FROM issues").get()?.c, 1);
+  // Gone from the board, still in the index. Dropping the row would take the
+  // history with it and leave a later lookup with nothing to say (r08c).
+  assert.equal(db.prepare("SELECT COUNT(*) c FROM issues WHERE state='OK'").get()?.c, 1);
+  assert.equal(
+    db.prepare("SELECT COUNT(*) c FROM issues WHERE state='PENDING_DELETE'").get()?.c,
+    1,
+  );
+  // The file tracking row does go: the file really is not there.
   assert.equal(db.prepare("SELECT COUNT(*) c FROM file_state WHERE path LIKE 'issues/%'").get()?.c, 1);
 });
 
