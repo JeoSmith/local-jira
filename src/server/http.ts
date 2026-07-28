@@ -14,8 +14,9 @@ import { canonicalJson } from "../storage/jcs.ts";
 import {
   findIssue,
   listIssues,
-  openBoard,
+  openBoardForWriting,
   type BoardHandle,
+  type WritableBoard,
 } from "../storage/board.ts";
 import { formatEtag } from "../storage/resource.ts";
 
@@ -34,18 +35,29 @@ export interface RunningServer {
 }
 
 interface RequestContext {
+  writable: WritableBoard;
   board: BoardHandle;
   store: CredentialStore;
   user: UserRecord | null;
 }
 
 export async function startServer(options: ServerOptions): Promise<RunningServer> {
-  const board = openBoard(options.cwd);
+  // Acquiring the writer lock here is what makes a second server refuse to
+  // start rather than interleave writes with this one (ADR-002).
+  const writable = await openBoardForWriting(options.cwd);
+  const board = writable.board;
   const store = new CredentialStore(board.localDirectory);
   store.purgeExpired();
 
+  if (writable.replay.replayed > 0) {
+    process.stderr.write(
+      `localjira: replayed ${writable.replay.replayed} unfinished write(s) ` +
+        `(${writable.replay.rolledForward} rolled forward, ${writable.replay.aborted} abandoned)\n`,
+    );
+  }
+
   const server = http.createServer((request, response) => {
-    handle(request, response, { board, store, user: null }).catch((error) => {
+    handle(request, response, { writable, board, store, user: null }).catch((error) => {
       respondError(response, 500, "E_INTERNAL", describe(error));
     });
   });
@@ -63,8 +75,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         server.closeAllConnections?.();
         server.close(() => {
           store.close();
-          board.close();
-          resolve();
+          void writable.close().then(resolve);
         });
       }),
   };
@@ -173,8 +184,8 @@ async function createIssueRoute(
   const body = await readJson(request);
 
   try {
-    const issue = createIssue(
-      context.board,
+    const issue = await createIssue(
+      context.writable,
       {
         project: String(body.project ?? ""),
         type: String(body.type ?? ""),

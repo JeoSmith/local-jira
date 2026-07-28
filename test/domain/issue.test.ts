@@ -8,7 +8,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { createIssue, IssueError, timestamp } from "../../src/domain/issue.ts";
-import { findIssue, listIssues, openBoard, type BoardHandle } from "../../src/storage/board.ts";
+import {
+  findIssue,
+  listIssues,
+  openBoard,
+  openBoardForWriting,
+  type WritableBoard,
+} from "../../src/storage/board.ts";
 import { parseMarkdownResource } from "../../src/storage/resource.ts";
 
 const CLI = fileURLToPath(new URL("../../src/cli.ts", import.meta.url));
@@ -17,7 +23,7 @@ const ACTOR = { id: "u_local", kind: "human" } as const;
 interface Sandbox {
   repo: string;
   board: string;
-  open(): BoardHandle;
+  open(): Promise<WritableBoard>;
 }
 
 function git(cwd: string, args: string[]): string {
@@ -53,15 +59,15 @@ function makeSandbox(t: { after: (fn: () => void) => void }): Sandbox {
 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-  return { repo, board, open: () => openBoard(repo) };
+  return { repo, board, open: () => openBoardForWriting(repo) };
 }
 
-test("creates one markdown file and returns the issued key", (t) => {
+test("creates one markdown file and returns the issued key", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
-  const issue = createIssue(
+  const issue = await createIssue(
     board,
     { project: "LJ", type: "story", title: "백로그 리스트 가상 스크롤" },
     ACTOR,
@@ -74,28 +80,34 @@ test("creates one markdown file and returns the issued key", (t) => {
   assert.match(issue.etag, /^[0-9a-f]{64}$/);
 });
 
-test("leaves exactly one new file in the working tree", (t) => {
+test("leaves exactly one new file in the working tree", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
-  createIssue(board, { project: "LJ", type: "story", title: "제목" }, ACTOR);
+  await createIssue(board, { project: "LJ", type: "story", title: "제목" }, ACTOR);
 
-  // -uall so git lists files rather than collapsing the new directory. AC1
-  // is about the index, outbox and runtime state staying out of the tree.
+  // -uall so git lists files rather than collapsing the new directory.
   const status = git(sandbox.board, ["status", "--porcelain", "-uall"])
     .split("\n")
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort();
 
-  assert.deepEqual(status, ["?? issues/LJ/LJ-1.md"]);
+  // One issue file and one event line. AC1's point is that *derived* state —
+  // index, outbox, runtime, credentials — stays under .local/ and never
+  // reaches git; the event log is domain data and belongs in the board.
+  assert.equal(status.length, 2, status.join(", "));
+  assert.equal(status.some((line) => line.endsWith("issues/LJ/LJ-1.md")), true);
+  assert.match(status.find((line) => line.includes("events/")) ?? "", /^\?\? events\/\d{4}-\d{2}-\d{2}\/\S+\.jsonl$/);
+  assert.equal(status.some((line) => line.includes(".local")), false);
 });
 
-test("writes the frontmatter contract", (t) => {
+test("writes the frontmatter contract", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
-  createIssue(
+  await createIssue(
     board,
     {
       project: "LJ", type: "story", title: "제목",
@@ -126,12 +138,12 @@ test("writes the frontmatter contract", (t) => {
   assert.equal(front.created_at, front.updated_at);
 });
 
-test("puts the description in the body, not in a heading", (t) => {
+test("puts the description in the body, not in a heading", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
-  createIssue(
+  await createIssue(
     board,
     {
       project: "LJ", type: "story", title: "제목",
@@ -151,17 +163,17 @@ test("puts the description in the body, not in a heading", (t) => {
   );
 });
 
-test("always starts an issue in BACKLOG", (t) => {
+test("always starts an issue in BACKLOG", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
-  const issue = createIssue(board, { project: "LJ", type: "story", title: "제목" }, ACTOR);
+  const issue = await createIssue(board, { project: "LJ", type: "story", title: "제목" }, ACTOR);
   assert.equal(issue.status, "BACKLOG");
 
   // S1-D2: transitions are the only way to change state, so creation may not
   // pick a different starting point.
-  assert.throws(
+  await assert.rejects(
     () => createIssue(board, { project: "LJ", type: "story", title: "제목", status: "TODO" }, ACTOR),
     (error: unknown) => {
       assert.ok(error instanceof IssueError);
@@ -171,23 +183,22 @@ test("always starts an issue in BACKLOG", (t) => {
   );
 });
 
-test("allocates keys in sequence per project", (t) => {
+test("allocates keys in sequence per project", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
-  const keys = ["a", "b", "c"].map(
-    (title) => createIssue(board, { project: "LJ", type: "task", title }, ACTOR).key,
-  );
+  const keys: string[] = [];
+  for (const title of ["a", "b", "c"]) {
+    keys.push((await createIssue(board, { project: "LJ", type: "task", title }, ACTOR)).key);
+  }
   assert.deepEqual(keys, ["LJ-1", "LJ-2", "LJ-3"]);
 });
 
-test("never reissues a number that a former key still holds", (t) => {
+test("never reissues a number that a former key still holds", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
-  t.after(() => board.close());
-
-  createIssue(board, { project: "LJ", type: "task", title: "one" }, ACTOR);
+  const board = await sandbox.open();
+  await createIssue(board, { project: "LJ", type: "task", title: "one" }, ACTOR);
 
   // Stand in for a rekeyed issue: LJ-9 was released and must stay reserved,
   // because a commit trailer may still point at it.
@@ -195,16 +206,18 @@ test("never reissues a number that a former key still holds", (t) => {
     path.join(sandbox.board, "issues/LJ/LJ-20.md"),
     `---\nuid: 01JOTHER${"0".repeat(18)}\nkey: LJ-20\nformer_keys: [LJ-9]\ntype: task\ntitle: rekeyed\nstatus: BACKLOG\n---\n\n`,
   );
-  const reopened = openBoard(sandbox.repo);
+  // Only one writer may hold the board, so the first is released first.
+  await board.close();
+  const reopened = await openBoardForWriting(sandbox.repo);
   t.after(() => reopened.close());
 
-  const next = createIssue(reopened, { project: "LJ", type: "task", title: "two" }, ACTOR);
+  const next = await createIssue(reopened, { project: "LJ", type: "task", title: "two" }, ACTOR);
   assert.equal(next.key, "LJ-21", "the highest number ever used wins, not the highest live one");
 });
 
-test("rejects input it cannot store faithfully", (t) => {
+test("rejects input it cannot store faithfully", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
   const codes: string[] = [];
@@ -217,7 +230,7 @@ test("rejects input it cannot store faithfully", (t) => {
     { project: "LJ", type: "story", title: "x", labels: ["has space"] },
   ]) {
     try {
-      createIssue(board, input, ACTOR);
+      await createIssue(board, input, ACTOR);
       codes.push("(accepted)");
     } catch (error) {
       codes.push(error instanceof IssueError ? error.code : "(other)");
@@ -232,16 +245,16 @@ test("rejects input it cannot store faithfully", (t) => {
     "E_INVALID_POINTS",
     "E_INVALID_LABEL",
   ]);
-  assert.equal(listIssues(board).length, 0, "no file may be written for a rejected request");
+  assert.equal(listIssues(board.board).length, 0, "no file may be written for a rejected request");
 });
 
-test("keeps null points distinct from zero", (t) => {
+test("keeps null points distinct from zero", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
-  const unestimated = createIssue(board, { project: "LJ", type: "task", title: "a" }, ACTOR);
-  const zero = createIssue(board, { project: "LJ", type: "task", title: "b", points: 0 }, ACTOR);
+  const unestimated = await createIssue(board, { project: "LJ", type: "task", title: "a" }, ACTOR);
+  const zero = await createIssue(board, { project: "LJ", type: "task", title: "b", points: 0 }, ACTOR);
 
   // The burndown excludes unestimated issues and counts zero-point ones (D8).
   assert.equal(unestimated.points, null);
@@ -250,18 +263,18 @@ test("keeps null points distinct from zero", (t) => {
   assert.equal(raw.includes("points:"), false, "unestimated omits the key entirely");
 });
 
-test("reads back through key and uid", (t) => {
+test("reads back through key and uid", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
+  const board = await sandbox.open();
   t.after(() => board.close());
 
-  const created = createIssue(
+  const created = await createIssue(
     board,
     { project: "LJ", type: "story", title: "제목", description: "설명" },
     ACTOR,
   );
 
-  const byKey = findIssue(board, created.key);
+  const byKey = findIssue(board.board, created.key);
   assert.ok(byKey && "issue" in byKey);
   assert.equal(byKey.issue.uid, created.uid);
   assert.equal(byKey.issue.etag, created.etag);
@@ -271,24 +284,23 @@ test("reads back through key and uid", (t) => {
     "the round trip returns the same body",
   );
 
-  assert.equal(findIssue(board, "LJ-9999"), null);
+  assert.equal(findIssue(board.board, "LJ-9999"), null);
 });
 
-test("preserves a hand-edited unknown key across a read", (t) => {
+test("preserves a hand-edited unknown key across a read", async (t) => {
   const sandbox = makeSandbox(t);
-  const board = sandbox.open();
-  t.after(() => board.close());
-
-  const created = createIssue(board, { project: "LJ", type: "story", title: "제목" }, ACTOR);
+  const board = await sandbox.open();
+  const created = await createIssue(board, { project: "LJ", type: "story", title: "제목" }, ACTOR);
   const file = path.join(sandbox.board, created.path);
   fs.writeFileSync(
     file,
     fs.readFileSync(file, "utf8").replace("schema_version: 1", "schema_version: 1\nmyOwnField: 유지"),
   );
 
-  const reopened = openBoard(sandbox.repo);
+  await board.close();
+  const reopened = await openBoardForWriting(sandbox.repo);
   t.after(() => reopened.close());
-  const found = findIssue(reopened, created.key);
+  const found = findIssue(reopened.board, created.key);
 
   assert.ok(found && "issue" in found);
   assert.equal((found.issue.resource as Record<string, unknown>).myOwnField, "유지");
@@ -303,7 +315,7 @@ test("formats a timestamp in the project timezone", () => {
   assert.equal(timestamp(null, instant), "2026-07-27T15:30:00Z");
 });
 
-test("creates an issue through the CLI", (t) => {
+test("creates an issue through the CLI", async (t) => {
   const sandbox = makeSandbox(t);
 
   const created = cli(sandbox.repo, [

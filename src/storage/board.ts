@@ -3,10 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { BootstrapError } from "../bootstrap/execute.ts";
+import { acquireLock, type BootstrapLock } from "../bootstrap/lock.ts";
 import { resolveRepositoryContext } from "../bootstrap/inspect.ts";
 import { getMeta, openIndex } from "./index-db.ts";
 import { LOCAL_DIRECTORY } from "./layout.ts";
+import { Outbox } from "./outbox.ts";
 import { incrementalSync, rebuildIndex, type ReindexStats } from "./reindex.ts";
+import { BoardWriter, type ReplayOutcome } from "./writer.ts";
+
+export const SERVER_LOCK_FILENAME = "server.lock";
 
 export interface BoardHandle {
   boardRoot: string;
@@ -20,6 +25,58 @@ export interface BoardHandle {
 export interface OpenBoardOptions {
   /** Force a full rebuild even when the index looks current. */
   rebuild?: boolean;
+}
+
+export interface WritableBoard {
+  board: BoardHandle;
+  writer: BoardWriter;
+  outbox: Outbox;
+  replay: ReplayOutcome;
+  lock: BootstrapLock;
+  close(): Promise<void>;
+}
+
+/**
+ * Opens the board for writing, as the single writer (ADR-002).
+ *
+ * The lock is an OS advisory lock on `.local/server.lock`, so a crashed
+ * process releases it without leaving anything to clean up, and a second
+ * writer is refused rather than allowed to interleave.
+ *
+ * Unfinished outbox records are replayed before the writer accepts anything,
+ * because applying a new write on top of a half-finished one would make the
+ * compare-and-swap meaningless.
+ */
+export async function openBoardForWriting(
+  cwd: string,
+  options: OpenBoardOptions = {},
+): Promise<WritableBoard> {
+  const board = openBoard(cwd, options);
+  let lock: BootstrapLock;
+
+  try {
+    lock = await acquireLock(path.join(board.localDirectory, SERVER_LOCK_FILENAME));
+  } catch (error) {
+    board.close();
+    throw error;
+  }
+
+  const outbox = new Outbox(board.localDirectory);
+  const writer = new BoardWriter(board, outbox);
+  const replay = writer.replay();
+
+  return {
+    board,
+    writer,
+    outbox,
+    replay,
+    lock,
+    close: async () => {
+      outbox.close();
+      board.close();
+      await lock.release();
+    },
+  };
 }
 
 /**

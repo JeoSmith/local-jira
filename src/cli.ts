@@ -30,6 +30,7 @@ import {
   indexStatus,
   listIssues,
   openBoard,
+  openBoardForWriting,
   type IndexStatus,
   type IssueDetail,
   type IssueSummary,
@@ -71,7 +72,7 @@ try {
       runIndexCommand(argv);
       break;
     case "issue":
-      runIssueCommand(argv);
+      await runIssueCommand(argv);
       break;
     case "admin":
       runAdminCommand(argv);
@@ -173,7 +174,7 @@ function runIndexCommand(args: string[]): void {
   }
 }
 
-function runIssueCommand(args: string[]): void {
+async function runIssueCommand(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
 
   if (sub === "list") {
@@ -221,10 +222,10 @@ function runIssueCommand(args: string[]): void {
       return;
     }
 
-    const board = openBoard(process.cwd());
+    const writable = await openBoardForWriting(process.cwd());
     try {
-      const issue = createIssue(
-        board,
+      const issue = await createIssue(
+        writable,
         {
           project: options.values.get("--project") ?? "",
           type: options.values.get("--type") ?? "",
@@ -250,7 +251,7 @@ function runIssueCommand(args: string[]): void {
         printIssueDetail(issue);
       }
     } finally {
-      board.close();
+      await writable.close();
     }
     return;
   }

@@ -134,10 +134,15 @@ test("Gate 1: an issue survives losing the index", { timeout: 120_000 }, async (
   assert.match(fileBefore, /^status: BACKLOG$/m);
   assert.match(fileBefore, /본문은 파일 그대로 남는다\./);
 
-  // Only the issue and the account belong to the board; everything the server
-  // built for itself lives under .local/ and stays out of git.
+  // The account, the issue and its event belong to the board. Everything the
+  // server built for itself — index, outbox, sessions, credentials — lives
+  // under .local/ and never reaches git.
   const tracked = git(board, ["status", "--porcelain", "-uall"]).split("\n").filter(Boolean).sort();
-  assert.deepEqual(tracked, [" M users.yaml", "?? issues/LJ/LJ-1.md"]);
+  assert.deepEqual(
+    tracked.map((line) => line.replace(/events\/[^ ]+$/, "events/…")),
+    [" M users.yaml", "?? events/…", "?? issues/LJ/LJ-1.md"],
+  );
+  assert.equal(tracked.some((line) => line.includes(".local")), false);
 
   // ── 5. lose the index ─────────────────────────────────────────────────────
   const indexFile = path.join(board, ".local", "index.sqlite");

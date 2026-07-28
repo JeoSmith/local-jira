@@ -73,6 +73,28 @@ export function bootstrapLockPath(gitCommonDir: string): string {
   return path.join(gitCommonDir, BOOTSTRAP_LOCK_FILENAME);
 }
 
+/**
+ * Takes an advisory lock on an arbitrary file.
+ *
+ * The bootstrap lock and the server's single-writer lock (ADR-002) need the
+ * same platform handling and the same crash behaviour, so they share one
+ * implementation rather than growing a second, less-tested copy.
+ */
+export async function acquireLock(
+  lockPath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<BootstrapLock> {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+
+  if (BSD_PLATFORMS.has(platform)) {
+    return acquireWithOpenExlock(lockPath);
+  }
+  if (platform === "linux") {
+    return acquireWithFlockHelper(lockPath);
+  }
+  throw new BootstrapLockUnsupportedError(platform);
+}
+
 export function isLockSupportedPlatform(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
@@ -91,16 +113,7 @@ export async function acquireBootstrapLock(
   gitCommonDir: string,
   platform: NodeJS.Platform = process.platform,
 ): Promise<BootstrapLock> {
-  const lockPath = bootstrapLockPath(gitCommonDir);
-  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
-
-  if (BSD_PLATFORMS.has(platform)) {
-    return acquireWithOpenExlock(lockPath);
-  }
-  if (platform === "linux") {
-    return acquireWithFlockHelper(lockPath);
-  }
-  throw new BootstrapLockUnsupportedError(platform);
+  return acquireLock(bootstrapLockPath(gitCommonDir), platform);
 }
 
 class OpenExlockLock implements BootstrapLock {

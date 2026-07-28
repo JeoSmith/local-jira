@@ -3,10 +3,9 @@ import path from "node:path";
 
 import { createUlid } from "../bootstrap/identifier.ts";
 import { yamlScalar } from "../bootstrap/scaffold.ts";
-import type { BoardHandle } from "../storage/board.ts";
+import type { BoardHandle, WritableBoard } from "../storage/board.ts";
 import { findIssue, type IssueDetail } from "../storage/board.ts";
 import { issuePath } from "../storage/layout.ts";
-import { incrementalSync } from "../storage/reindex.ts";
 
 export const ISSUE_TYPES = [
   "epic",
@@ -67,11 +66,12 @@ export interface Actor {
   kind: "human" | "agent";
 }
 
-export function createIssue(
-  board: BoardHandle,
+export async function createIssue(
+  writable: WritableBoard,
   input: CreateIssueInput,
   actor: Actor,
-): IssueDetail {
+): Promise<IssueDetail> {
+  const board = writable.board;
   const project = requireProject(board, input.project);
   const type = requireType(input.type);
   const title = requireTitle(input.title);
@@ -102,26 +102,31 @@ export function createIssue(
     );
   }
 
-  writeFileAtomic(
-    absolute,
-    renderIssueFile({
-      uid,
-      key,
-      type,
-      title,
-      points,
-      labels,
-      assignee: input.assignee ?? null,
-      acceptance: input.acceptance ?? [],
-      createdAt: now,
-      createdByKind: actor.kind,
-      description: input.description ?? "",
-    }),
-  );
+  const contents = renderIssueFile({
+    uid,
+    key,
+    type,
+    title,
+    points,
+    labels,
+    assignee: input.assignee ?? null,
+    acceptance: input.acceptance ?? [],
+    createdAt: now,
+    createdByKind: actor.kind,
+    description: input.description ?? "",
+  });
 
-  // r09 replaces this with the outbox write path; until then the index is
-  // refreshed the same way any external edit is picked up.
-  incrementalSync(board.boardRoot, board.db);
+  // Through the writer, so the file, the index and the event move together and
+  // a crash anywhere in between is replayable (r09).
+  await writable.writer.write({
+    kind: "create",
+    targetPath: relative,
+    contents,
+    expectedHash: null,
+    event: buildEvent(board, uid, key, actor, now),
+    actorId: actor.id,
+    actorKind: actor.kind,
+  });
 
   const found = findIssue(board, key);
   if (!found || !("issue" in found)) {
@@ -344,43 +349,49 @@ function isControl(char: string): boolean {
   return (code >= 0 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f);
 }
 
-function writeFileAtomic(target: string, contents: string): void {
-  const directory = path.dirname(target);
-  fs.mkdirSync(directory, { recursive: true });
-  const temporary = path.join(directory, `.${path.basename(target)}.${process.pid}.tmp`);
+/**
+ * Builds the event that accompanies the write.
+ *
+ * Event files are per-day and per-node so two clones appending on the same day
+ * never touch the same file, which is what keeps the log out of every merge
+ * (PRD §5.3).
+ */
+function buildEvent(
+  board: BoardHandle,
+  uid: string,
+  key: string,
+  actor: Actor,
+  at: string,
+): { eventId: string; path: string; line: string } {
+  const eventId = createUlid();
+  const day = at.slice(0, 10);
+  const node = nodeId(board);
 
-  let fd: number | null = null;
-  try {
-    fd = fs.openSync(temporary, "w", 0o644);
-    fs.writeFileSync(fd, contents, "utf8");
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fd = null;
-    fs.renameSync(temporary, target);
-    syncDirectory(directory);
-  } catch (error) {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // The original error is the one that matters.
-      }
-    }
-    fs.rmSync(temporary, { force: true });
-    throw error;
-  }
+  return {
+    eventId,
+    path: `events/${day}/${node}.jsonl`,
+    line: JSON.stringify({
+      event_id: eventId,
+      at,
+      actor_id: actor.id,
+      actor_kind: actor.kind,
+      target_kind: "issue",
+      target_uid: uid,
+      verb: "issue.created",
+      detail: { key },
+    }),
+  };
 }
 
-function syncDirectory(directory: string): void {
-  let fd: number | null = null;
+function nodeId(board: BoardHandle): string {
   try {
-    fd = fs.openSync(directory, "r");
-    fs.fsyncSync(fd);
+    const contents = fs.readFileSync(
+      path.join(board.localDirectory, "node.yaml"),
+      "utf8",
+    );
+    return /^node_id:\s*(\S+)$/m.exec(contents)?.[1] ?? "unknown";
   } catch {
-    // Not available on every filesystem; rename is still atomic without it.
-  } finally {
-    if (fd !== null) {
-      fs.closeSync(fd);
-    }
+    // A board that predates node identity still has to be writable.
+    return "unknown";
   }
 }

@@ -327,6 +327,54 @@ function clearFile(db: DatabaseSync, identity: FileIdentity): void {
   }
 }
 
+/**
+ * Reindexes exactly one file.
+ *
+ * The write path knows precisely which file it touched, so a full scan would
+ * be wasted work — and would also pick up unrelated concurrent edits into a
+ * transaction that is supposed to be about one write.
+ */
+export function syncPath(
+  boardRoot: string,
+  db: DatabaseSync,
+  relativePath: string,
+): void {
+  const identity = classify(relativePath);
+  if (!identity) {
+    return;
+  }
+
+  const absolute = path.join(boardRoot, relativePath);
+  const stats: ReindexStats = {
+    scanned: 1, parsed: 0, hashed: 0, removed: 0, failed: 0, durationMs: 0,
+  };
+
+  clearFile(db, identity);
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(absolute);
+  } catch {
+    // Deleted: the entity rows are gone, so drop the tracking row too.
+    db.prepare("DELETE FROM file_state WHERE path = ?").run(relativePath);
+    return;
+  }
+
+  const bytes = fs.readFileSync(absolute);
+  loadFile(
+    db,
+    {
+      identity,
+      absolutePath: absolute,
+      mtimeMs: Math.floor(stat.mtimeMs),
+      size: stat.size,
+    },
+    bytes,
+    fileHash(bytes),
+    stats,
+  );
+}
+
 export function lastRebuildAt(db: DatabaseSync): number | null {
   const value = getMeta(db, "last_full_rebuild_at");
   return value === null ? null : Number(value);
