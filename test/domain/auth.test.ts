@@ -395,7 +395,9 @@ test("signs in, then serves the domain API", async (t) => {
       body: { project: "LJ", type: "story", title: "HTTP로 만든 이슈", points: 3 },
     });
     assert.equal(created.status, 201);
-    assert.equal(created.json.issue.key, "LJ-1");
+    // A single resource is returned bare so its ETag hashes the response body
+    // itself (ADR-003); collections keep an envelope.
+    assert.equal(created.json.key, "LJ-1");
     assert.match(created.etag ?? "", /^"[0-9a-f]{64}"$/);
 
     const listed = await request(server, "GET", "/issues", { cookie });

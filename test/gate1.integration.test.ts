@@ -121,7 +121,7 @@ test("Gate 1: an issue survives losing the index", { timeout: 120_000 }, async (
       acceptance: ["인덱스를 지워도 같은 내용이 돌아온다"],
     });
     assert.equal(created.status, 201);
-    assert.equal(created.json.issue.key, "LJ-1");
+    assert.equal(created.json.key, "LJ-1");
     assert.match(created.etag ?? "", /^"[0-9a-f]{64}"$/);
   } finally {
     await first.close();
@@ -165,8 +165,8 @@ test("Gate 1: an issue survives losing the index", { timeout: 120_000 }, async (
       "a rebuilt index must produce the same representation, byte for byte",
     );
     assert.deepEqual(
-      shown.json.issue,
-      created.json.issue,
+      shown.json,
+      created.json,
       "every field, not just the ones the test happens to name",
     );
 

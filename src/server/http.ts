@@ -4,13 +4,18 @@ import type { AddressInfo } from "node:net";
 import { CredentialStore } from "../auth/credentials.ts";
 import { createIssue, IssueError } from "../domain/issue.ts";
 import {
+  PreconditionFailedError,
+  PreconditionRequiredError,
+  updateIssue,
+} from "../domain/update.ts";
+import {
   authenticate,
   listUsers,
   needsBootstrap,
   UserError,
   type UserRecord,
 } from "../domain/users.ts";
-import { canonicalJson } from "../storage/jcs.ts";
+import { canonicalJson, type JsonValue } from "../storage/jcs.ts";
 import {
   findIssue,
   listIssues,
@@ -119,6 +124,17 @@ async function handle(
   if (route === "POST /issues") {
     return createIssueRoute(request, response, authed);
   }
+  if (
+    (request.method === "PUT" || request.method === "PATCH") &&
+    url.pathname.startsWith("/issues/")
+  ) {
+    return updateIssueRoute(
+      decodeURIComponent(url.pathname.slice("/issues/".length)),
+      request,
+      response,
+      authed,
+    );
+  }
   if (request.method === "GET" && url.pathname.startsWith("/issues/")) {
     return showIssueRoute(decodeURIComponent(url.pathname.slice("/issues/".length)), response, authed);
   }
@@ -204,12 +220,64 @@ async function createIssueRoute(
       { id: context.user!.id, kind: context.user!.role === "agent" ? "agent" : "human" },
     );
 
-    response.setHeader("ETag", formatEtag(issue.etag));
     response.setHeader("Location", `/issues/${issue.key}`);
-    respondJson(response, 201, { issue });
+    respondResource(response, 201, issue.resource as JsonValue, issue.etag);
   } catch (error) {
     if (error instanceof IssueError) {
       return respondError(response, 400, error.code, error.message, error.detail);
+    }
+    throw error;
+  }
+}
+
+async function updateIssueRoute(
+  key: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  const ifMatch = request.headers["if-match"];
+
+  try {
+    const result = await updateIssue(
+      context.writable,
+      key,
+      typeof ifMatch === "string" ? ifMatch : null,
+      {
+        title: typeof body.title === "string" ? body.title : undefined,
+        points: body.points === undefined ? undefined : body.points === null ? null : Number(body.points),
+        labels: Array.isArray(body.labels) ? body.labels.map(String) : undefined,
+        assignee: body.assignee === undefined ? undefined : (body.assignee as string | null),
+        description: typeof body.description === "string" ? body.description : undefined,
+        status: typeof body.status === "string" ? body.status : undefined,
+      },
+      { id: context.user!.id, kind: context.user!.role === "agent" ? "agent" : "human" },
+    );
+
+    respondResource(response, 200, result.issue.resource as JsonValue, result.issue.etag);
+  } catch (error) {
+    if (error instanceof PreconditionRequiredError) {
+      response.setHeader("ETag", formatEtag(error.currentEtag));
+      return respondError(
+        response, 428, error.code, error.message,
+        `Read the issue first and send its ETag as If-Match.`,
+      );
+    }
+    if (error instanceof PreconditionFailedError) {
+      response.setHeader("ETag", formatEtag(error.currentEtag));
+      // The client keeps its own base, so the server supplies only what it
+      // has: the current document and which fields were refused.
+      return respondJson(response, 412, {
+        error: { code: error.code, message: error.message, detail: null },
+        etag: error.currentEtag,
+        document: error.document,
+        conflicts: error.conflicts,
+      });
+    }
+    if (error instanceof IssueError) {
+      const status = error.code === "E_UNKNOWN_PROJECT" ? 404 : 400;
+      return respondError(response, status, error.code, error.message, error.detail);
     }
     throw error;
   }
@@ -235,8 +303,10 @@ function showIssueRoute(
     );
   }
 
-  response.setHeader("ETag", formatEtag(found.issue.etag));
-  respondJson(response, 200, { issue: found.issue });
+  // ADR-003: the ETag is the hash of the bytes actually sent, so a single
+  // resource is served as its canonical representation rather than wrapped in
+  // an envelope whose hash would be something else entirely.
+  respondResource(response, 200, found.issue.resource as JsonValue, found.issue.etag);
 }
 
 function resolveUser(
@@ -291,6 +361,21 @@ async function readJson(
   } catch {
     return {};
   }
+}
+
+function respondResource(
+  response: http.ServerResponse,
+  status: number,
+  resource: JsonValue,
+  etag: string,
+): void {
+  const body = canonicalJson(resource);
+  response.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    ETag: formatEtag(etag),
+  });
+  response.end(body);
 }
 
 function respondJson(
