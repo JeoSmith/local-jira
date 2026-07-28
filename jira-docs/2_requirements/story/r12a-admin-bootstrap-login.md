@@ -1,6 +1,6 @@
 ---
 title: "admin 부트스트랩과 로컬 계정 로그인"
-status: draft
+status: done
 owner: 이성훈
 created: 2026-07-27
 updated: 2026-07-27
@@ -23,16 +23,16 @@ priority: P0
 
 ## 인수 조건 (Acceptance Criteria)
 
-- [ ] Given `.localjira/users.yaml`에 계정이 0건인 최초 설치 상태, When 서버를 기동하면, Then 부트스트랩 모드로 진입해 admin 계정 1건(식별자·표시명·비밀번호) 생성을 요구하고, 완료 전까지 도메인 API(`GET /issues`, `POST /issues` 등)는 전부 **401**을 반환한다.
-- [ ] Given 부트스트랩 완료, When `.localjira/users.yaml`을 열면, Then 해당 계정의 `id`·`display_name`·`role: admin`만 존재하고 비밀번호 해시·salt·토큰 등 자격증명 필드는 **한 개도 존재하지 않는다**(N6, §5.3).
-- [ ] Given 부트스트랩 완료, When `git -C .localjira status`를 확인하면, Then 변경 파일로 `users.yaml`만 잡히고 `.local/credentials.sqlite`는 `.gitignore`에 의해 추적되지 않는다.
-- [ ] Given 비밀번호가 저장된 상태, When `.local/credentials.sqlite`의 레코드를 확인하면, Then 값이 **argon2id 해시**이며 평문 비밀번호는 파일·로그·API 응답 어디에도 남지 않는다(N6).
-- [ ] Given 유효한 계정, When 올바른 식별자·비밀번호로 로그인 API를 호출하면, Then **200**과 함께 세션이 발급되고 후속 도메인 API 요청이 인증된 `actor_id`로 처리된다.
-- [ ] Given 유효한 계정, When 틀린 비밀번호로 로그인하면, Then **401**이며 세션이 발급되지 않고, 이후 도메인 API 호출도 401이다.
-- [ ] Given 로그인하지 않은 클라이언트, When `POST /issues`를 호출하면, Then **401**이다. (권한 부족을 뜻하는 403과 응답 코드가 구분된다 — `r12b` 참조.)
-- [ ] Given admin이 로그인한 상태, When 계정 1건을 추가로 생성하면, Then `users.yaml`에 식별자·표시명·역할이 추가되고 비밀번호 해시는 `.local/credentials.sqlite`에만 기록되며, 계정 생성 사실이 **이벤트로 남는다**(N7 "권한/토큰 변경", R14).
-- [ ] Given 기존 보드를 `git clone`으로 받은 새 기기, When 서버를 기동하면, Then `users.yaml`의 계정 목록은 보이지만 해당 기기에 자격증명이 없으므로 로그인할 수 없고, 비밀번호 재설정이 **정상 경로**로 안내된다(D5 — `.local/`은 백업 대상이 아니다).
-- [ ] Given 로그인 시도, When 성공·실패가 발생하면, Then 응답 지연·에러 메시지가 저장된 해시를 역추론할 수 있는 정보를 노출하지 않는다.
+- [x] Given `.localjira/users.yaml`에 계정이 0건인 최초 설치 상태, When 서버를 기동하면, Then 부트스트랩 모드로 진입해 admin 계정 1건(식별자·표시명·비밀번호) 생성을 요구하고, 완료 전까지 도메인 API(`GET /issues`, `POST /issues` 등)는 전부 **401**을 반환한다.
+- [x] Given 부트스트랩 완료, When `.localjira/users.yaml`을 열면, Then 해당 계정의 `id`·`display_name`·`role: admin`만 존재하고 비밀번호 해시·salt·토큰 등 자격증명 필드는 **한 개도 존재하지 않는다**(N6, §5.3).
+- [x] Given 부트스트랩 완료, When `git -C .localjira status`를 확인하면, Then 변경 파일로 `users.yaml`만 잡히고 `.local/credentials.sqlite`는 `.gitignore`에 의해 추적되지 않는다.
+- [x] Given 비밀번호가 저장된 상태, When `.local/credentials.sqlite`의 레코드를 확인하면, Then 값이 **argon2id 해시**이며 평문 비밀번호는 파일·로그·API 응답 어디에도 남지 않는다(N6).
+- [x] Given 유효한 계정, When 올바른 식별자·비밀번호로 로그인 API를 호출하면, Then **200**과 함께 세션이 발급되고 후속 도메인 API 요청이 인증된 `actor_id`로 처리된다.
+- [x] Given 유효한 계정, When 틀린 비밀번호로 로그인하면, Then **401**이며 세션이 발급되지 않고, 이후 도메인 API 호출도 401이다.
+- [x] Given 로그인하지 않은 클라이언트, When `POST /issues`를 호출하면, Then **401**이다. (권한 부족을 뜻하는 403과 응답 코드가 구분된다 — `r12b` 참조.)
+- [x] Given admin이 로그인한 상태, When 계정 1건을 추가로 생성하면, Then `users.yaml`에 식별자·표시명·역할이 추가되고 비밀번호 해시는 `.local/credentials.sqlite`에만 기록되며, 계정 생성 사실이 **이벤트로 남는다**(N7 "권한/토큰 변경", R14).
+- [x] Given 기존 보드를 `git clone`으로 받은 새 기기, When 서버를 기동하면, Then `users.yaml`의 계정 목록은 보이지만 해당 기기에 자격증명이 없으므로 로그인할 수 없고, 비밀번호 재설정이 **정상 경로**로 안내된다(D5 — `.local/`은 백업 대상이 아니다).
+- [x] Given 로그인 시도, When 성공·실패가 발생하면, Then 응답 지연·에러 메시지가 저장된 해시를 역추론할 수 있는 정보를 노출하지 않는다.
 
 > ⚠ 미정: 세션 전달 방식(HTTP-only 쿠키 vs 세션 토큰 헤더)과 세션 만료 시간 — PRD는 PAT의 `expires_at`만 규정하고 사람 세션 수명은 언급하지 않는다.
 > ⚠ 미정: `.local/credentials.sqlite`가 없는 기기에서 비밀번호를 다시 세우는 구체적 절차(admin이 원격에서 재설정할 수 없으므로 로컬 CLI 재설정 명령이 필요한지) — D5는 "기기별 재발급이 정상 경로"라고만 말한다.

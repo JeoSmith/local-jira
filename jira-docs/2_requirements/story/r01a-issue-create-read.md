@@ -1,6 +1,6 @@
 ---
 title: "이슈 생성·조회 (파일 SoT)"
-status: draft
+status: done
 owner: 이성훈
 created: 2026-07-27
 updated: 2026-07-27
@@ -23,16 +23,16 @@ priority: P0
 
 ## 인수 조건 (Acceptance Criteria)
 
-- [ ] Given 프로젝트 `LJ`가 초기화된 상태, When `POST /issues`에 `type=story, title="백로그 리스트 가상 스크롤"`을 보내면, Then 201과 함께 `uid`(ULID)·서버 발급 표시 키 `LJ-<n>`이 반환되고 `.localjira/issues/LJ/LJ-<n>.md` 파일 1개가 생성된다.
-- [ ] Given 위 생성 직후, When `git -C .localjira status`를 확인하면, Then 신규 파일은 그 이슈 파일 **1개만** 잡힌다(인덱스·outbox·runtime은 `.local/`이라 추적 대상이 아니다). — AC1
-- [ ] Given 생성 요청, When 파일이 기록되면, Then frontmatter에 `uid`, `key`, `former_keys: []`, `type`, `title`, `status`, `created_at`, `updated_at`, `created_by_kind`, `schema_version: 1`이 포함되고 모든 시각은 프로젝트 timezone offset이 붙은 RFC 3339 문자열이다.
-- [ ] Given `type`이 `epic|story|task|bug|spike|subtask` 중 하나가 아닌 요청, When `POST /issues`를 호출하면, Then 400과 함께 허용 타입 목록이 반환되고 파일은 생성되지 않는다.
-- [ ] Given `assignee`(human 또는 agent User), `labels`, `points`, `acceptance`를 포함한 생성 요청, When 저장되면, Then `acceptance`는 frontmatter에 `{id, text, done}` 객체 배열로 기록되고 본문 heading으로는 기록되지 않는다.
-- [ ] Given 설명(description)을 포함한 생성 요청, When 저장되면, Then 설명은 frontmatter 아래 본문에 원문 그대로 들어가고, 서버는 본문의 heading을 도메인 구분자로 해석하지 않는다.
-- [ ] Given 저장된 이슈, When `GET /issues/{key}` 또는 `GET /issues/{uid}`를 호출하면, Then 200과 함께 동일한 도메인 데이터가 반환되고 응답 헤더에 정규화 내용 기준 강한 `ETag`가 실린다(동시성 동작 자체는 R10).
-- [ ] Given 사람이 에디터로 frontmatter에 서버가 모르는 키를 추가한 파일, When 조회·재저장하면, Then 그 키와 본문이 원문 그대로 보존되고 API가 임의로 재작성하지 않는다.
-- [ ] Given `status`를 지정하지 않은 생성 요청, When 저장되면, Then `status=BACKLOG`로 기록된다(§6.1 — 에이전트는 사람이 `TODO`로 올린 것만 집는다는 전제).
-- [ ] Given 존재하지 않는 키 `LJ-9999`, When 조회하면, Then 404를 반환한다.
+- [x] Given 프로젝트 `LJ`가 초기화된 상태, When `POST /issues`에 `type=story, title="백로그 리스트 가상 스크롤"`을 보내면, Then 201과 함께 `uid`(ULID)·서버 발급 표시 키 `LJ-<n>`이 반환되고 `.localjira/issues/LJ/LJ-<n>.md` 파일 1개가 생성된다.
+- [x] Given 위 생성 직후, When `git -C .localjira status`를 확인하면, Then 신규 파일은 그 이슈 파일 **1개만** 잡힌다(인덱스·outbox·runtime은 `.local/`이라 추적 대상이 아니다). — AC1
+- [x] Given 생성 요청, When 파일이 기록되면, Then frontmatter에 `uid`, `key`, `former_keys: []`, `type`, `title`, `status`, `created_at`, `updated_at`, `created_by_kind`, `schema_version: 1`이 포함되고 모든 시각은 프로젝트 timezone offset이 붙은 RFC 3339 문자열이다.
+- [x] Given `type`이 `epic|story|task|bug|spike|subtask` 중 하나가 아닌 요청, When `POST /issues`를 호출하면, Then 400과 함께 허용 타입 목록이 반환되고 파일은 생성되지 않는다.
+- [x] Given `assignee`(human 또는 agent User), `labels`, `points`, `acceptance`를 포함한 생성 요청, When 저장되면, Then `acceptance`는 frontmatter에 `{id, text, done}` 객체 배열로 기록되고 본문 heading으로는 기록되지 않는다.
+- [x] Given 설명(description)을 포함한 생성 요청, When 저장되면, Then 설명은 frontmatter 아래 본문에 원문 그대로 들어가고, 서버는 본문의 heading을 도메인 구분자로 해석하지 않는다.
+- [x] Given 저장된 이슈, When `GET /issues/{key}` 또는 `GET /issues/{uid}`를 호출하면, Then 200과 함께 동일한 도메인 데이터가 반환되고 응답 헤더에 정규화 내용 기준 강한 `ETag`가 실린다(동시성 동작 자체는 R10).
+- [x] Given 사람이 에디터로 frontmatter에 서버가 모르는 키를 추가한 파일, When 조회·재저장하면, Then 그 키와 본문이 원문 그대로 보존되고 API가 임의로 재작성하지 않는다.
+- [x] Given `status`를 지정하지 않은 생성 요청, When 저장되면, Then `status=BACKLOG`로 기록된다(§6.1 — 에이전트는 사람이 `TODO`로 올린 것만 집는다는 전제).
+- [x] Given 존재하지 않는 키 `LJ-9999`, When 조회하면, Then 404를 반환한다.
 
 > ⚠ 미정: 생성 시 클라이언트가 `status`를 `BACKLOG` 외 값으로 직접 지정할 수 있는지, 그리고 `points`의 허용값 집합(양의 정수만/피보나치/0 허용)을 PRD가 정하지 않았다.
 

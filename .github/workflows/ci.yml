@@ -57,6 +57,11 @@ jobs:
       - name: Full suite
         run: npm test
 
+      - name: Sprint document agrees with the stories
+        # The document once announced a wave complete while every story in it
+        # was still a draft with no criteria ticked. Nothing compared the two.
+        run: npm run docs:check
+
       - name: Bootstrap smoke test
         # Exercises the CLI end to end, not just the library the tests import.
         shell: bash
