@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   acquireBootstrapLock,
@@ -196,3 +198,50 @@ async function waitFor(
   }
   throw new Error("condition was not met in time");
 }
+
+test("release keeps the process alive until the helper's pipes have closed", async (t) => {
+  // Contract: `release()` must settle before the process is allowed to exit.
+  // The stub separates the two events `close` waits for — the helper exits when
+  // stdin closes, but a background subshell inherits its stdout and holds the
+  // pipe open afterwards.
+  //
+  // Honest scope: this passes both with and without the handle fix in
+  // `release()`, so it is *not* the guard for that regression. Reproducing it
+  // took real load on Linux, and what actually catches it is the suite running
+  // at full concurrency on ubuntu — which is why `npm test` no longer
+  // serialises. This test covers the contract, CI covers the race.
+  const stub = installStubFlock(
+    t,
+    ["printf R", "( sleep 1 ) &", "cat"].join("\n"),
+  );
+  const lockPath = path.join(stub.dir, "board.lock");
+
+  const script = `
+    import { acquireWithFlockHelper } from ${JSON.stringify(
+      fileURLToPath(new URL("../../src/bootstrap/lock.ts", import.meta.url)),
+    )};
+    const lock = await acquireWithFlockHelper(${JSON.stringify(lockPath)});
+    await lock.release();
+    process.stdout.write("RELEASED");
+  `;
+  const scriptPath = path.join(stub.dir, "release.mjs");
+  fs.writeFileSync(scriptPath, script);
+
+  const result = spawnSync(process.execPath, [scriptPath], {
+    encoding: "utf8",
+    env: stub.env,
+    timeout: 30_000,
+  });
+
+  assert.equal(
+    result.stdout,
+    "RELEASED",
+    `the process exited before release() settled: ${result.stderr}`,
+  );
+  assert.doesNotMatch(
+    result.stderr,
+    /unsettled top-level await/,
+    "release() left the caller's await pending",
+  );
+  assert.equal(result.status, 0);
+});

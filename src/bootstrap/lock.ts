@@ -184,13 +184,23 @@ class FlockHelperLock implements BootstrapLock {
     return new Promise((resolve) => {
       // The helper was unref'd while idle; hold the loop open until it is gone,
       // otherwise the process could exit before the lock is actually released.
+      //
+      // All three handles, not just the process. "close" fires once the child
+      // has exited *and* its pipes have drained, which are separate events, so
+      // re-referencing the process alone leaves the gap between them unheld. A
+      // loop with nothing else to do then exits with this promise pending — the
+      // caller's `await` never settles and its `finally` never runs. Because
+      // every git call in the bootstrap path is `spawnSync`, these two helper
+      // promises are the *only* asynchrony in `localjira init`, which is why
+      // the symptom was an unsettled top-level await pointing straight at it.
       child.ref();
+      child.stdout.ref();
+      child.stderr.ref();
 
       const fallback = setTimeout(
         () => child.kill("SIGKILL"),
         FLOCK_EXIT_GRACE_MS,
       );
-      fallback.unref();
 
       // "close" rather than "exit": it fires after the helper has exited *and*
       // its stdio has been drained, which is when the kernel has certainly
