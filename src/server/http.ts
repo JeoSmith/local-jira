@@ -31,7 +31,10 @@ import {
   type BoardHandle,
   type WritableBoard,
 } from "../storage/board.ts";
+import { reconcileExternal } from "../storage/external.ts";
+import { watchBoard, type BoardWatcher } from "../storage/watcher.ts";
 import { formatEtag } from "../storage/resource.ts";
+import { EventStream } from "./stream.ts";
 
 export const SESSION_COOKIE = "localjira_session";
 
@@ -39,11 +42,16 @@ export interface ServerOptions {
   cwd: string;
   host?: string;
   port?: number;
+  /** Off in tests that drive reconciliation by hand. */
+  watch?: boolean;
+  debounceMs?: number;
 }
 
 export interface RunningServer {
   url: string;
   port: number;
+  /** Reconciles now instead of waiting for the debounce window. */
+  reconcile(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -51,6 +59,7 @@ interface RequestContext {
   writable: WritableBoard;
   board: BoardHandle;
   store: CredentialStore;
+  stream: EventStream;
   user: UserRecord | null;
 }
 
@@ -69,8 +78,39 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     );
   }
 
+  const stream = new EventStream();
+
+  // Reconciliation is serialised: two overlapping scans would race on the same
+  // index rows, and the watcher can easily fire again while one is running.
+  let reconciling: Promise<void> = Promise.resolve();
+  const reconcile = (): Promise<void> => {
+    reconciling = reconciling.then(async () => {
+      const result = await reconcileExternal(writable);
+      for (const change of result.changed) {
+        stream.publish({
+          type: "issue.changed",
+          data: { key: change.key, uid: change.uid, path: change.path, source: "external" },
+        });
+      }
+      if (result.removed > 0) {
+        stream.publish({ type: "index.state", data: { removed: result.removed } });
+      }
+    }, () => undefined);
+    return reconciling;
+  };
+
+  let watcher: BoardWatcher | null = null;
+  if (options.watch !== false) {
+    watcher = watchBoard(board.boardRoot, {
+      debounceMs: options.debounceMs,
+      onBatch: () => void reconcile(),
+      onError: (error) =>
+        process.stderr.write(`localjira: watcher error: ${error.message}\n`),
+    });
+  }
+
   const server = http.createServer((request, response) => {
-    handle(request, response, { writable, board, store, user: null }).catch((error) => {
+    handle(request, response, { writable, board, store, stream, user: null }).catch((error) => {
       respondError(response, 500, "E_INTERNAL", describe(error));
     });
   });
@@ -89,8 +129,14 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   return {
     url: `http://${options.host ?? "127.0.0.1"}:${address.port}`,
     port: address.port,
+    reconcile: () => {
+      watcher?.flush();
+      return reconcile();
+    },
     close: () => {
       closing ??= new Promise<void>((resolve) => {
+        watcher?.close();
+        stream.close();
         server.closeAllConnections?.();
         server.close(() => {
           store.close();
@@ -131,6 +177,9 @@ async function handle(
   }
   const authed: RequestContext = { ...context, user };
 
+  if (route === "GET /stream") {
+    return context.stream.attach(request, response);
+  }
   if (route === "GET /me") {
     return respondJson(response, 200, { user });
   }

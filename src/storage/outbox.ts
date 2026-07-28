@@ -17,13 +17,14 @@ export const STAGES = [
 ] as const;
 export type Stage = (typeof STAGES)[number];
 
-export type OpKind = "create" | "update" | "delete";
+/** `event` records an event with no file write — used for external changes. */
+export type OpKind = "create" | "update" | "delete" | "event";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS outbox (
   seq            INTEGER PRIMARY KEY AUTOINCREMENT,
   op_id          TEXT NOT NULL UNIQUE,
-  kind           TEXT NOT NULL CHECK (kind IN ('create','update','delete')),
+  kind           TEXT NOT NULL CHECK (kind IN ('create','update','delete','event')),
   stage          TEXT NOT NULL CHECK (stage IN
                    ('PENDING','FILE_DONE','INDEX_DONE','EVENT_DONE','DONE','ABORTED')),
   target_path    TEXT NOT NULL,

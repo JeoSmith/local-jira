@@ -27,6 +27,8 @@ export interface ReindexStats {
   removed: number;
   failed: number;
   durationMs: number;
+  /** Board-relative paths whose content actually changed. */
+  changed?: string[];
 }
 
 /** Ordered so that a comment's body row exists before its ops are replayed. */
@@ -207,6 +209,7 @@ export function incrementalSync(
         }
 
         clearFile(db, file.identity);
+        (stats.changed ??= []).push(file.identity.path);
         if (loadFile(db, file, bytes, hash, stats)) {
           stats.parsed += 1;
         }

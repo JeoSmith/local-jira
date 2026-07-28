@@ -16,7 +16,7 @@ export type CrashPoint =
   | "after_event";
 
 export interface WriteRequest {
-  kind: "create" | "update" | "delete";
+  kind: "create" | "update" | "delete" | "event";
   /** Board-relative path. */
   targetPath: string;
   /** Final bytes; null for a delete. */
@@ -99,7 +99,7 @@ export class BoardWriter {
     }
 
     const absolute = path.join(this.#board.boardRoot, request.targetPath);
-    const current = readHash(absolute);
+    const current = request.kind === "event" ? null : readHash(absolute);
 
     if (request.expectedHash !== undefined && current !== request.expectedHash) {
       throw new WriteConflictError(
@@ -137,10 +137,14 @@ export class BoardWriter {
     let stage = from;
 
     if (stage === "PENDING") {
-      if (record.payload === null) {
-        fs.rmSync(absolute, { force: true });
-      } else {
-        writeFileAtomic(absolute, record.payload);
+      // An `event` op has no target file: the change it describes already
+      // happened outside the API, and this only records that it did.
+      if (record.kind !== "event") {
+        if (record.payload === null) {
+          fs.rmSync(absolute, { force: true });
+        } else {
+          writeFileAtomic(absolute, record.payload);
+        }
       }
       this.#outbox.advance(record.seq, "FILE_DONE");
       stage = "FILE_DONE";
@@ -148,7 +152,9 @@ export class BoardWriter {
     }
 
     if (stage === "FILE_DONE") {
-      syncPath(this.#board.boardRoot, this.#board.db, record.targetPath);
+      if (record.kind !== "event") {
+        syncPath(this.#board.boardRoot, this.#board.db, record.targetPath);
+      }
       this.#outbox.advance(record.seq, "INDEX_DONE");
       stage = "INDEX_DONE";
       crashPoint("after_index");
@@ -188,6 +194,14 @@ export class BoardWriter {
 
     for (const record of this.#outbox.pending()) {
       outcome.replayed += 1;
+      if (record.kind === "event") {
+        // Nothing to compare: replaying only re-appends the event, and the
+        // event_id check keeps that from duplicating.
+        this.#applyFrom(record, laterOf(record.stage), true);
+        outcome.rolledForward += 1;
+        continue;
+      }
+
       const absolute = path.join(this.#board.boardRoot, record.targetPath);
       const current = readHash(absolute);
 
