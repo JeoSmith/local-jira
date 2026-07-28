@@ -252,6 +252,18 @@ export function patchLinks(original: string, links: Link[]): string {
   return `${match[1]}${lines.join("\n")}${match[3]}${match[4]}`;
 }
 
+/** Sets one of the two rank fields, leaving the other alone (ADR-005 §1). */
+export function patchRank(original: string, field: string, rank: string): string {
+  const match = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n)([\s\S]*)$/.exec(original);
+  if (!match) {
+    throw new IssueError("E_INVALID_TITLE", "The issue file has no frontmatter");
+  }
+  // Quoted: a rank like `0|i0000f:` is not a plain scalar, and an unquoted one
+  // would be read back as something else entirely.
+  const lines = setScalar(match[2].split("\n"), field, `"${rank}"`);
+  return `${match[1]}${lines.join("\n")}${match[3]}${match[4]}`;
+}
+
 /**
  * Stamps the fields the server owns after a change is known to be real.
  *

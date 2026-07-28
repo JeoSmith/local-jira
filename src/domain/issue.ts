@@ -8,6 +8,7 @@ import { findIssue, type IssueDetail } from "../storage/board.ts";
 import { issuePath } from "../storage/layout.ts";
 import { buildEvent } from "./events.ts";
 import { validateParent } from "./hierarchy.ts";
+import { between } from "./rank.ts";
 
 export const ISSUE_TYPES = [
   "epic",
@@ -109,6 +110,10 @@ export async function createIssue(
 
   const uid = createUlid();
   const key = allocateKey(board, project.key);
+  // Ranked on arrival, appended to the end. Leaving it unset would put new
+  // issues ahead of every ranked one — SQLite sorts NULL first — so the first
+  // deliberate reorder would appear to send the card the wrong way.
+  const backlogRank = nextBacklogRank(board, project.key);
   const now = timestamp(project.timezone);
   const relative = issuePath(project.key, key);
   const absolute = path.join(board.boardRoot, relative);
@@ -131,6 +136,7 @@ export async function createIssue(
     assignee: input.assignee ?? null,
     acceptance: input.acceptance ?? [],
     parent: parent?.uid ?? null,
+    backlogRank,
     createdAt: now,
     createdByKind: actor.kind,
     description: input.description ?? "",
@@ -186,6 +192,25 @@ function requireProject(board: BoardHandle, key: string): ProjectRow {
     );
   }
   return row;
+}
+
+/** The rank that puts a new issue at the end of the project backlog. */
+function nextBacklogRank(board: BoardHandle, project: string): string {
+  const row = board.db
+    .prepare(
+      `SELECT backlog_rank FROM issues
+        WHERE project = ? AND state = 'OK' AND backlog_rank IS NOT NULL
+        ORDER BY backlog_rank DESC, uid DESC LIMIT 1`,
+    )
+    .get(project) as { backlog_rank: string } | undefined;
+
+  try {
+    return between(row?.backlog_rank ?? null, null);
+  } catch {
+    // The tail has run out of room. Creation must not fail for that — the next
+    // deliberate move rebalances, and until then the uid tie-break orders it.
+    return row?.backlog_rank ?? between(null, null);
+  }
 }
 
 function requireType(value: string): IssueType {
@@ -276,6 +301,7 @@ interface RenderInput {
   assignee: string | null;
   acceptance: AcceptanceInput[];
   parent: string | null;
+  backlogRank: string;
   createdAt: string;
   createdByKind: Actor["kind"];
   description: string;
@@ -326,6 +352,7 @@ export function renderIssueFile(input: RenderInput): string {
   if (input.labels.length > 0) {
     lines.push(`labels: [${input.labels.map(yamlScalar).join(", ")}]`);
   }
+  lines.push(`backlog_rank: "${input.backlogRank}"`);
   lines.push(...renderAcceptance(input.acceptance));
 
   lines.push(

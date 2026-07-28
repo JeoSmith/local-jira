@@ -33,6 +33,13 @@ import {
 import { buildEvent, redact } from "../domain/events.ts";
 import { childrenOf } from "../domain/hierarchy.ts";
 import { claimability, relatedTo } from "../domain/links.ts";
+import {
+  isRankField,
+  moveIssue,
+  NeighboursMovedError,
+  orderedRegion,
+} from "../domain/ordering.ts";
+import { RankSpaceExhausted } from "../domain/rank.ts";
 import { canonicalJson, type JsonValue } from "../storage/jcs.ts";
 import {
   findIssue,
@@ -268,6 +275,14 @@ async function handle(
     );
     return guard(response, authed, "issue:write", () =>
       transitionRoute(key, request, response, authed),
+    );
+  }
+  if (request.method === "POST" && url.pathname.endsWith("/rank")) {
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/rank".length));
+    // Its own capability, not `issue:write`: an agent may edit an issue without
+    // being allowed to decide what the team works on next (D9).
+    return guard(response, authed, "issue:rank", () =>
+      rankRoute(key, request, response, authed),
     );
   }
   if (request.method === "POST" && url.pathname.endsWith("/links")) {
@@ -752,6 +767,65 @@ function childrenRoute(
     return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
   }
   respondJson(response, 200, { children: childrenOf(context.board, found.issue.uid) });
+}
+
+async function rankRoute(
+  key: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  const field = String(body.field ?? "backlog_rank");
+
+  if (!isRankField(field)) {
+    return respondError(
+      response, 400, "E_INVALID_RANK_FIELD",
+      `"${field}" is not an ordering.`,
+      "Use backlog_rank or board_rank.",
+    );
+  }
+
+  try {
+    const result = await moveIssue(
+      context.writable,
+      key,
+      {
+        field,
+        after: typeof body.after === "string" ? body.after : null,
+        before: typeof body.before === "string" ? body.before : null,
+      },
+      actorOf(context),
+      headerValue(request, "if-match"),
+    );
+
+    if (result.changed) {
+      publishIssueChange(context, key, null, "updated");
+    }
+    respondJson(response, 200, {
+      key,
+      field,
+      rank: result.rank,
+      changed: result.changed,
+      // Named, not just counted: a rebalance rewrites other people's files and
+      // the caller's view of them is now stale.
+      rebalanced: result.rebalanced,
+    });
+  } catch (error) {
+    if (error instanceof NeighboursMovedError) {
+      return respondJson(response, 409, {
+        error: { code: error.code, message: error.message, detail: null },
+        order: error.order,
+      });
+    }
+    if (error instanceof RankSpaceExhausted) {
+      return respondError(
+        response, 409, error.code, error.message,
+        "The region could not be rebalanced. Reload the list and try again.",
+      );
+    }
+    return handleWriteError(error, response);
+  }
 }
 
 /** The relations on an issue, both declared and reversed, plus claimability. */
