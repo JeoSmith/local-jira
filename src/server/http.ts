@@ -15,6 +15,7 @@ import {
   IMMUTABLE_FIELDS,
   PreconditionFailedError,
   PreconditionRequiredError,
+  QuarantinedError,
   transitionIssue,
   TransitionError,
   updateIssue,
@@ -50,6 +51,7 @@ import {
   type WritableBoard,
 } from "../storage/board.ts";
 import { reconcileExternal, reconcileFull } from "../storage/external.ts";
+import { boardHealth, quarantineList } from "../storage/integrity.ts";
 import { findTombstone, type ReconcileReason } from "../storage/reconcile.ts";
 import { watchBoard, type BoardWatcher } from "../storage/watcher.ts";
 import { formatEtag } from "../storage/resource.ts";
@@ -336,6 +338,19 @@ async function handle(
       return activityRoute(rest.slice(0, -"/activity".length), url, response, authed);
     }
     return showIssueRoute(rest, response, authed);
+  }
+  if (route === "GET /integrity/issues") {
+    return guard(response, authed, "issue:read", () => {
+      const health = boardHealth(authed.board.db);
+      respondJson(response, 200, {
+        quarantined: quarantineList(authed.board.db),
+        // Not quarantined, but the board cannot act on them either: two active
+        // sprints is a rule violation no merge can settle, and duplicate ranks
+        // sort fine but want rebalancing (ADR-005 §1).
+        sprintConflicts: health.sprintConflicts,
+        duplicateRankRegions: health.duplicateRanks,
+      });
+    });
   }
 
   respondError(response, 404, "E_NOT_FOUND", `No route for ${route}`);
@@ -740,6 +755,15 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
       etag: error.currentEtag,
       document: error.document,
       conflicts: error.conflicts,
+    });
+  }
+  if (error instanceof QuarantinedError) {
+    // 409 rather than 423: the entity is not locked by anybody, it is in a
+    // state the board cannot vouch for, and the fix is in the file.
+    return respondJson(response, 409, {
+      error: { code: error.code, message: error.message, detail: error.recovery },
+      reason: error.reason,
+      path: error.path,
     });
   }
   if (error instanceof ChildrenPresentError) {
