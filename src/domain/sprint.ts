@@ -370,6 +370,57 @@ async function releaseIssue(
   });
 }
 
+export interface SprintPlan {
+  id: string;
+  capacity: number | null;
+  /** Points of the estimated issues in scope. */
+  committed: number;
+  /** Issues with no estimate, counted rather than folded in as zero. */
+  unestimated: number;
+  issues: number;
+  /** How far past capacity, or null when there is no capacity to exceed. */
+  over: number | null;
+}
+
+/**
+ * What a sprint holds, against what it said it could hold.
+ *
+ * Unestimated issues are reported separately rather than added as zero. Folding
+ * them in would make the total look like it covered the whole scope when it
+ * covers only the part somebody has sized — the same reason R20 keeps them out
+ * of the burndown denominator (D8).
+ *
+ * The comparison is advisory. Exceeding capacity warns and blocks nothing —
+ * neither adding an issue nor starting the sprint (PRD R6, AC5). A plan is an
+ * estimate, and a tool that refuses to record what a team decided to attempt is
+ * describing a different team.
+ */
+export function planOf(board: BoardHandle, id: string): SprintPlan | null {
+  const sprint = findSprint(board, id);
+  if (sprint === null) {
+    return null;
+  }
+
+  const row = board.db
+    .prepare(
+      `SELECT COALESCE(SUM(points), 0) AS committed,
+              SUM(CASE WHEN points IS NULL THEN 1 ELSE 0 END) AS unestimated,
+              COUNT(*) AS issues
+         FROM issues WHERE sprint_id = ? AND state = 'OK'`,
+    )
+    .get(id) as { committed: number; unestimated: number; issues: number };
+
+  const committed = Number(row.committed);
+  return {
+    id,
+    capacity: sprint.capacity,
+    committed,
+    unestimated: Number(row.unestimated ?? 0),
+    issues: Number(row.issues),
+    over: sprint.capacity === null ? null : Math.max(0, committed - sprint.capacity),
+  };
+}
+
 // ── rendering and validation ────────────────────────────────────────────────
 
 interface RenderInput {
