@@ -474,6 +474,26 @@ function clearSlot() {
   document.querySelector("#card-slot")?.remove();
 }
 
+/**
+ * What a run's badge says.
+ *
+ * `STALE` is reported beside RUNNING rather than instead of it: the claim is
+ * still valid and the work may still be going, so replacing the state would
+ * turn a warning into a verdict (ADR-004 §3).
+ */
+function runLabel(run) {
+  if (run.state === "RUNNING") return run.stale ? "실행 중 · 응답 없음" : "실행 중";
+  if (run.state === "DONE") return run.has_result ? "완료" : "완료 · 결과 미제출";
+  if (run.state === "FAILED") return "실패";
+  return "취소됨";
+}
+
+function runClass(run) {
+  if (run.state === "RUNNING") return run.stale ? "stale" : "running";
+  if (run.state === "DONE") return run.has_result ? "done" : "done-bare";
+  return "stopped";
+}
+
 function renderCard(issue) {
   const card = element("article", "issue-card");
   const keyRow = element("div", "card-key-row");
@@ -504,6 +524,25 @@ function renderCard(issue) {
     blocked.append(element("span", "card-blocked", `차단 ${issue.blocked_by.join(", ")}`));
     card.append(blocked);
   }
+  // Who is on it now, and whether that session is still answering. S5 is about
+  // spotting the stalled ones by eye, so this belongs on the card rather than
+  // behind a click.
+  if (issue.claim || issue.run) {
+    const work = element("div", "card-meta card-run");
+    if (issue.claim) {
+      work.append(element("span", "card-claim", `선점 ${issue.claim.owner_id}`));
+    }
+    if (issue.run) {
+      work.append(element("span", `card-run-state ${runClass(issue.run)}`, runLabel(issue.run)));
+      // §6.2: delegated work shows both who ran it and who asked for it, or an
+      // agent's action reads as the director's own.
+      if (issue.run.initiated_by && issue.run.initiated_by !== issue.run.agent_id) {
+        work.append(element("span", "card-run-by", `지시 ${issue.run.initiated_by}`));
+      }
+    }
+    card.append(work);
+  }
+
   if (issue.status === "BLOCKED" && issue.blocked_from) {
     const back = STATUS_LABELS[issue.blocked_from] || issue.blocked_from;
     // 으로/로 depends on whether the word ends in a consonant. Getting it wrong

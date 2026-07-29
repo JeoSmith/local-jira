@@ -14,6 +14,11 @@ import {
   type Capability,
   type TokenScope,
 } from "../auth/authorize.ts";
+import { claimIssue, ClaimError, holdsClaimOn } from "../domain/claim.ts";
+import {
+  endRun, findRun, heartbeatRun, listRunsFor, RunError, startRun, type RunRecord,
+} from "../domain/run.ts";
+import { RuntimeStore, type Claim } from "../storage/runtime.ts";
 import {
   CredentialStore,
   TOKEN_DEFAULT_TTL_MS,
@@ -109,6 +114,7 @@ interface RequestContext {
   writable: WritableBoard;
   board: BoardHandle;
   store: CredentialStore;
+  runtime: RuntimeStore;
   stream: EventStream;
   user: UserRecord | null;
   /** Set when a PAT authenticated this request rather than a browser session. */
@@ -133,6 +139,15 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const board = writable.board;
   const store = new CredentialStore(board.localDirectory);
   store.purgeExpired();
+
+  // §5.4: a restart reclaims expired claims in full and keeps the rest. A
+  // server restarting must not cost a working agent its place, and a lease that
+  // ran out while nothing was watching must not survive as a ghost.
+  const runtime = new RuntimeStore(board.localDirectory);
+  const reclaimed = runtime.reclaimExpired();
+  if (reclaimed > 0) {
+    process.stderr.write(`localjira: reclaimed ${reclaimed} expired claim(s)\n`);
+  }
 
   // After the replay, so "did this key produce anything" is answered against a
   // finished journal. A reservation that never reached the journal is released;
@@ -258,7 +273,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 
   const server = http.createServer((request, response) => {
     handle(request, response, {
-      writable, board, store, stream, user: null,
+      writable, board, store, runtime, stream, user: null,
       reconcile, awaitWriteGate,
       closeWriteGate: (running: Promise<void>) => {
         writeGate = running.finally(() => {
@@ -297,6 +312,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         server.closeAllConnections?.();
         server.close(() => {
           store.close();
+          runtime.close();
           void writable.close().then(resolve);
         });
       });
@@ -398,6 +414,44 @@ async function handle(
       authed,
     );
   }
+  if (route === "GET /runs") {
+    return guard(response, authed, "issue:read", "issue:read", () =>
+      listRunsRoute(url, response, authed),
+    );
+  }
+  if (route === "POST /runs") {
+    return guard(response, authed, "issue:write", "run:write", () =>
+      withIdempotency(request, response, authed, (idempotency) =>
+        startRunRoute(request, response, authed, idempotency),
+      ),
+    );
+  }
+  const heartbeat = /^\/runs\/([^/]+)\/heartbeat$/.exec(url.pathname);
+  if (heartbeat && request.method === "POST") {
+    return guard(response, authed, "issue:write", "run:write", () =>
+      heartbeatRoute(decodeURIComponent(heartbeat[1]), response, authed),
+    );
+  }
+  const runEnd = /^\/runs\/([^/]+)\/end$/.exec(url.pathname);
+  if (runEnd && request.method === "POST") {
+    return guard(response, authed, "issue:write", "run:write", () =>
+      endRunRoute(decodeURIComponent(runEnd[1]), request, response, authed),
+    );
+  }
+  const runItem = /^\/runs\/([^/]+)$/.exec(url.pathname);
+  if (runItem && request.method === "GET") {
+    return guard(response, authed, "issue:read", "issue:read", () => {
+      const run = findRun(authed.board, decodeURIComponent(runItem[1]));
+      if (run === null) {
+        return respondError(response, 404, "E_UNKNOWN_RUN", "No such run.");
+      }
+      respondJson(response, 200, {
+        ...runView(run),
+        claim: claimView(authed.runtime.findByRun(run.runId)),
+      });
+    });
+  }
+
   if (route === "GET /tokens") {
     return listTokensRoute(response, authed);
   }
@@ -421,6 +475,15 @@ async function handle(
       withIdempotency(request, response, authed, (idempotency) =>
         createIssueRoute(request, response, authed, idempotency),
       ),
+    );
+  }
+  if (request.method === "POST" && url.pathname.endsWith("/claim")) {
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/claim".length));
+    // `issue:transition` rather than a scope of its own: claiming is how an
+    // agent gets permission to move an issue, so a token that may not move one
+    // has no use for a claim (§6.4 fixes the seven).
+    return guard(response, authed, "issue:write", "issue:transition", () =>
+      claimRoute(key, request, response, authed),
     );
   }
   if (request.method === "POST" && url.pathname.endsWith("/transitions")) {
@@ -759,7 +822,22 @@ function listIssuesRoute(
       : undefined,
     after: parseCursor(cursor),
   });
-  const issues = page.issues;
+
+  // Claims live in `.local/runtime.sqlite`, a different database from the index,
+  // so this cannot be a join. Applied after the page rather than by attaching
+  // that file, because the index is rebuilt into a fresh database and an ATTACH
+  // would make the disposable one depend on the other's presence. The cost is
+  // that a page may come back shorter than its limit; the number of live claims
+  // is one per working agent, so that is a small cost for AC9's promise that a
+  // claimable list holds nothing already taken.
+  const issues =
+    claimable === "true"
+      ? page.issues.filter(
+          (issue) =>
+            context.runtime.find(issue.uid) === null &&
+            (issue.status === "TODO" || issue.status === "IN_PROGRESS"),
+        )
+      : page.issues;
 
   // The badge shows who touched a card last, which is not the same as who
   // created it: without this an agent's change is indistinguishable from the
@@ -1087,21 +1165,225 @@ async function updateIssueRoute(
   }
 }
 
+// ── runs and claims ─────────────────────────────────────────────────────────
+
+async function startRunRoute(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+  idempotency?: { actorId: string; key: string },
+): Promise<void> {
+  const body = await readJson(request);
+  try {
+    const run = await startRun(
+      context.writable,
+      {
+        issue: String(body.issue ?? ""),
+        sessionId: String(body.session_id ?? ""),
+        agentId: String(body.agent_id ?? ""),
+        initiatedBy: String(body.initiated_by ?? ""),
+        branch: String(body.branch ?? ""),
+        idempotency,
+      },
+      actorOf(context),
+    );
+    response.setHeader("Location", `/runs/${run.runId}`);
+    respondJson(response, 201, runView(run));
+  } catch (error) {
+    return respondRunError(error, response);
+  }
+}
+
+async function heartbeatRoute(
+  runId: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  try {
+    const run = await heartbeatRun(context.writable, runId, actorOf(context), (updated) => {
+      // S3-D3: one signal moves both. The claim's lease is renewed here rather
+      // than by its own endpoint, so a live run can never hold a dead claim.
+      context.runtime.renew(updated.runId);
+    });
+    respondJson(response, 200, {
+      ...runView(run),
+      claim: claimView(context.runtime.findByRun(run.runId)),
+    });
+  } catch (error) {
+    return respondRunError(error, response);
+  }
+}
+
+async function endRunRoute(
+  runId: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  const state = String(body.state ?? "DONE");
+  if (state !== "DONE" && state !== "FAILED" && state !== "CANCELLED") {
+    return respondError(
+      response, 400, "E_INVALID_RUN_STATE",
+      `A run ends as DONE, FAILED or CANCELLED, not ${state}.`,
+    );
+  }
+
+  try {
+    const run = await endRun(
+      context.writable,
+      runId,
+      { state, result: (body.result ?? null) as JsonValue | null },
+      actorOf(context),
+    );
+    // The claim goes with the run: an ended session holding an issue is the
+    // ghost occupancy ADR-004 exists to prevent.
+    context.runtime.releaseRun(runId);
+    respondJson(response, 200, runView(run));
+  } catch (error) {
+    return respondRunError(error, response);
+  }
+}
+
+function listRunsRoute(
+  url: URL,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const issue = url.searchParams.get("issue");
+  if (issue === null) {
+    return respondError(
+      response, 400, "E_FILTER_REQUIRED",
+      "Say which issue's runs to list: /runs?issue=LJ-12",
+    );
+  }
+  const found = findIssue(context.board, issue);
+  if (!found || !("issue" in found)) {
+    return respondError(response, 404, "E_UNKNOWN_ISSUE", `No issue ${issue}.`);
+  }
+  respondJson(response, 200, {
+    runs: listRunsFor(context.board, found.issue.uid).map(runView),
+  });
+}
+
+async function claimRoute(
+  key: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  try {
+    const result = await claimIssue(
+      context.writable,
+      context.runtime,
+      key,
+      String(body.run_id ?? ""),
+      actorOf(context),
+    );
+    // 200 either way: a repeat from the same run is the same claim with a new
+    // lease, and 201 would say something was created that was not (D10).
+    respondJson(response, 200, { ...claimView(result.claim), issue: result.issueKey });
+  } catch (error) {
+    if (error instanceof ClaimError) {
+      const status = error.code === "E_UNKNOWN_ISSUE" || error.code === "E_UNKNOWN_RUN" ? 404 : 409;
+      return respondError(response, status, error.code, error.message, error.detail, error.extra);
+    }
+    return respondRunError(error, response);
+  }
+}
+
+function runView(run: RunRecord): Record<string, unknown> {
+  return {
+    run_id: run.runId,
+    issue: run.issueKey,
+    session_id: run.sessionId,
+    agent_id: run.agentId,
+    initiated_by: run.initiatedBy,
+    branch: run.branch,
+    state: run.state,
+    // Reported beside `state` rather than folded into it: a stale run is still
+    // RUNNING and still holds its claim, and collapsing the two would make the
+    // warning look like a conclusion (ADR-004 §3, S3-D2).
+    stale: run.stale,
+    started_at: run.startedAt,
+    last_heartbeat_at: run.lastHeartbeatAt,
+    ended_at: run.endedAt,
+    result: run.result,
+  };
+}
+
+/**
+ * The most recent run on an issue, reduced to what a card shows.
+ *
+ * Only the latest, because a card has room for one badge and the question it
+ * answers is "what is happening now". The full list is on the issue detail.
+ */
+function latestRunBadge(
+  context: RequestContext,
+  issueUid: string,
+): Record<string, unknown> | null {
+  const [latest] = listRunsFor(context.board, issueUid);
+  return latest === undefined
+    ? null
+    : {
+        run_id: latest.runId,
+        agent_id: latest.agentId,
+        initiated_by: latest.initiatedBy,
+        state: latest.state,
+        stale: latest.stale,
+        // A run that ended without a result is not the same as one that
+        // finished, and S5 asks for the difference to be visible (r17b AC10).
+        has_result: latest.result !== null,
+      };
+}
+
+function claimView(claim: Claim | null): Record<string, unknown> | null {
+  return claim === null
+    ? null
+    : {
+        owner_id: claim.ownerId,
+        run_id: claim.runId,
+        acquired_at: new Date(claim.acquiredAt).toISOString(),
+        last_heartbeat_at: new Date(claim.lastHeartbeatAt).toISOString(),
+        lease_expires_at: new Date(claim.leaseExpiresAt).toISOString(),
+      };
+}
+
+function respondRunError(error: unknown, response: http.ServerResponse): void {
+  if (error instanceof RunError) {
+    const status =
+      error.code === "E_UNKNOWN_RUN" || error.code === "E_UNKNOWN_ISSUE"
+        ? 404
+        : error.code === "E_RUN_NOT_OWNED"
+          ? 403
+          : error.code === "E_RUN_NOT_RUNNING"
+            ? 409
+            : 400;
+    return respondError(response, status, error.code, error.message, error.detail);
+  }
+  if (error instanceof IssueError) {
+    return respondError(response, 400, error.code, error.message, error.detail);
+  }
+  throw error;
+}
+
 /** The three an agent may not reach on scope alone (§6.1, ADR-004 §2). */
 const CLAIM_GATED = new Set(["IN_PROGRESS", "IN_REVIEW", "DONE"]);
 
 /**
  * Whether this actor holds a live claim on the issue.
  *
- * Claims arrive with r16a; until then nobody holds one, which is the truthful
- * answer and not a placeholder — an agent cannot start work it has not been
- * able to reserve. r16a replaces the body of this function and the gate above
- * keeps working unchanged.
+ * The one gate the transition route consults, and the only place that decides
+ * what "holding a claim" means. An agent reaching IN_PROGRESS with somebody
+ * else's claim, or with none, is refused by this returning false.
  */
 function holdsClaim(context: RequestContext, key: string): boolean {
-  void context;
-  void key;
-  return false;
+  const found = findIssue(context.board, key);
+  if (!found || !("issue" in found)) {
+    return false;
+  }
+  return holdsClaimOn(context.runtime, found.issue.uid, context.user!.id);
 }
 
 async function transitionRoute(
@@ -1764,6 +2046,10 @@ function respondBoard(
       claimable: claim.claimable,
       blocked_by: claim.blockedBy,
       blocked_from: blockedFrom,
+      // Who is on it and how that run is doing. On the card rather than behind
+      // a click because S5's whole point is finding the stalled ones by eye.
+      claim: claimView(context.runtime.find(issue.uid)),
+      run: latestRunBadge(context, issue.uid),
       // Computed here from §5.2 rather than left for the screen to work out.
       // A second copy of the transition table in the client is a copy that
       // drifts, and the first sign would be a drag the board allowed and the
@@ -2327,6 +2613,16 @@ function showIssueRoute(
     response.setHeader("X-Blocked-By", claim.blockedBy.join(","));
   }
 
+  // Headers for the same reason as the two above: a claim is runtime state that
+  // comes and goes, and putting it in the body would move the issue's ETag
+  // every time an agent picked it up or let it go.
+  const held = context.runtime.find(found.issue.uid);
+  if (held !== null) {
+    response.setHeader("X-Claim-Owner", held.ownerId);
+    response.setHeader("X-Claim-Run", held.runId);
+    response.setHeader("X-Claim-Lease-Expires", new Date(held.leaseExpiresAt).toISOString());
+  }
+
   // ADR-003: the ETag is the hash of the bytes actually sent, so a single
   // resource is served as its canonical representation rather than wrapped in
   // an envelope whose hash would be something else entirely.
@@ -2474,8 +2770,15 @@ function respondError(
   code: string,
   message: string,
   detail: string | null = null,
+  /**
+   * Fields the caller needs to act on, beside the envelope.
+   *
+   * A claim refusal has to say who holds it and until when, or an agent that
+   * is told 409 has no way to decide whether to wait or give up.
+   */
+  extra: Record<string, unknown> = {},
 ): void {
-  respondJson(response, status, { error: { code, message, detail } });
+  respondJson(response, status, { error: { code, message, detail }, ...extra });
 }
 
 function describe(error: unknown): string {

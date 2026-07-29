@@ -157,6 +157,11 @@ test("claimable excludes issues held up by an unfinished blocker", async (t) => 
     body: { kind: "blocked_by", to: blocker.uid },
   });
 
+  // Refined first: r16a AC9 makes `claimable` mean "an agent could pick this up
+  // now", and an item still in the backlog is one nobody has agreed to do.
+  await moveTo(session, blocked.key, "TODO");
+  await moveTo(session, free.key, "TODO");
+
   let claimable = await keysOf(session, "?claimable=true");
   assert.equal(claimable.includes(blocked.key), false, "the blocked one is out");
   assert.equal(claimable.includes(free.key), true);
@@ -178,6 +183,9 @@ test("a relation declared from the other side still blocks", async (t) => {
     ifMatch: (await call(session, "GET", `/issues/${blocker.key}`)).etag ?? "",
     body: { kind: "blocks", to: blocked.uid },
   });
+
+  await moveTo(session, blocked.key, "TODO");
+  await moveTo(session, blocker.key, "TODO");
 
   const claimable = await keysOf(session, "?claimable=true");
   assert.equal(claimable.includes(blocked.key), false);
