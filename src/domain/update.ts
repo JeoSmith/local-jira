@@ -38,6 +38,7 @@ export const UPDATABLE = [
   "assignee",
   "acceptance",
   "parent",
+  "sprint",
   "description",
 ] as const;
 export type UpdatableField = (typeof UPDATABLE)[number];
@@ -50,6 +51,8 @@ export interface UpdateIssueInput {
   acceptance?: AcceptanceInput[];
   /** uid of the parent, or null to detach. */
   parent?: string | null;
+  /** Sprint id, or null to send the issue back to the backlog. */
+  sprint?: string | null;
   description?: string;
   /** Rejected if present — transitions have their own endpoint. */
   status?: string;
@@ -140,6 +143,10 @@ export async function updateIssue(
     );
   }
 
+  if (input.sprint !== undefined && input.sprint !== null) {
+    requireOpenSprint(board, input.sprint);
+  }
+
   if (input.parent !== undefined && input.parent !== null) {
     const type = String((issue.resource as Record<string, unknown>).type ?? "");
     refuseIfTargetQuarantined(board, input.parent);
@@ -228,6 +235,11 @@ export function patchIssueFile(original: string, input: UpdateIssueInput): strin
     lines = input.parent === null
       ? removeKey(lines, "parent")
       : setScalar(lines, "parent", input.parent);
+  }
+  if (input.sprint !== undefined) {
+    lines = input.sprint === null
+      ? removeKey(lines, "sprint")
+      : setScalar(lines, "sprint", input.sprint);
   }
   if (input.acceptance !== undefined) {
     lines = setBlock(lines, "acceptance", renderAcceptance(normaliseAcceptance(input.acceptance)));
@@ -445,6 +457,32 @@ function normaliseEtag(value: string): string {
     return "";
   }
   return trimmed.replace(/^"(.*)"$/, "$1");
+}
+
+/**
+ * Refuses a sprint that cannot take new work.
+ *
+ * A closed sprint is the record of what happened, so adding to it would edit
+ * history. A sprint that does not exist at all is refused here rather than
+ * written and left for the integrity pass — through the API we know, and
+ * writing a reference we know is broken would be choosing to break the board
+ * (§5.6 covers the same violation arriving through a file).
+ */
+function requireOpenSprint(board: WritableBoard["board"], id: string): void {
+  const row = board.db
+    .prepare("SELECT id, status FROM sprints WHERE id = ? AND state = 'OK'")
+    .get(id) as { id: string; status: string | null } | undefined;
+
+  if (!row) {
+    throw new IssueError("E_UNKNOWN_SPRINT", `No sprint with id ${id} on this board.`);
+  }
+  if (row.status === "CLOSED") {
+    throw new IssueError(
+      "E_SPRINT_CLOSED",
+      `${id} is closed and cannot take new issues.`,
+      "Move the issue to a planned or active sprint instead.",
+    );
+  }
 }
 
 function requireKnownType(value: string): IssueType {

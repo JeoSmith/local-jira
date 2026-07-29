@@ -41,6 +41,7 @@ import {
   deleteSprint,
   findSprint,
   listSprints,
+  planOf,
   SprintNotEmptyError,
   updateSprint,
 } from "../domain/sprint.ts";
@@ -465,6 +466,24 @@ async function handle(
     );
   }
 
+  const sprintPlan = /^\/sprints\/([^/]+)\/plan$/.exec(url.pathname);
+  if (sprintPlan && request.method === "GET") {
+    return guard(response, authed, "issue:read", () => {
+      const plan = planOf(authed.board, decodeURIComponent(sprintPlan[1]));
+      if (plan === null) {
+        return respondError(response, 404, "E_SPRINT_NOT_FOUND", "No such sprint.");
+      }
+      respondJson(response, 200, plan);
+    });
+  }
+
+  const sprintIssues = /^\/sprints\/([^/]+)\/issues$/.exec(url.pathname);
+  if (sprintIssues && request.method === "POST") {
+    return guard(response, authed, "issue:write", () =>
+      moveIssuesRoute(decodeURIComponent(sprintIssues[1]), request, response, authed),
+    );
+  }
+
   const sprintItem = /^\/sprints\/([^/]+)$/.exec(url.pathname);
   if (sprintItem) {
     const id = decodeURIComponent(sprintItem[1]);
@@ -742,6 +761,7 @@ async function updateIssueRoute(
         labels: Array.isArray(body.labels) ? body.labels.map(String) : undefined,
         assignee: body.assignee === undefined ? undefined : (body.assignee as string | null),
         parent: body.parent === undefined ? undefined : (body.parent as string | null),
+        sprint: body.sprint === undefined ? undefined : (body.sprint as string | null),
         acceptance: Array.isArray(body.acceptance)
           ? body.acceptance.map((item) =>
               typeof item === "string"
@@ -1109,6 +1129,58 @@ async function rankRoute(
     }
     return handleWriteError(error, response);
   }
+}
+
+/**
+ * Moves several issues into or out of a sprint in one request.
+ *
+ * Each issue is still its own write with its own precondition — the batch is a
+ * convenience for the caller, not a transaction. A partial failure therefore
+ * reports which ones moved and which did not, instead of pretending the whole
+ * thing either happened or didn't when the files say otherwise.
+ */
+async function moveIssuesRoute(
+  id: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  const keys = Array.isArray(body.keys) ? body.keys.map(String) : [];
+  const target = id === "backlog" ? null : id;
+
+  if (keys.length === 0) {
+    return respondError(response, 400, "E_INVALID_REQUEST", "Name at least one issue key.");
+  }
+
+  const moved: string[] = [];
+  const failed: Array<{ key: string; code: string; message: string }> = [];
+
+  for (const key of keys) {
+    try {
+      const found = findIssue(context.board, key);
+      if (found === null || !("issue" in found)) {
+        failed.push({ key, code: "E_ISSUE_NOT_FOUND", message: `No issue with key ${key}` });
+        continue;
+      }
+      await updateIssue(
+        context.writable,
+        key,
+        found.issue.etag,
+        { sprint: target },
+        actorOf(context),
+      );
+      moved.push(key);
+    } catch (error) {
+      const code = error instanceof IssueError ? error.code : "E_INTERNAL";
+      failed.push({ key, code, message: describe(error) });
+    }
+  }
+
+  for (const key of moved) {
+    publishIssueChange(context, key, null, "updated");
+  }
+  respondJson(response, failed.length === 0 ? 200 : 207, { moved, failed });
 }
 
 async function createSprintRoute(
