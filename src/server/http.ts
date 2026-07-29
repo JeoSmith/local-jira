@@ -12,6 +12,7 @@ import {
   require as requireCapability,
   TOKEN_SCOPES,
   type Capability,
+  type TokenScope,
 } from "../auth/authorize.ts";
 import {
   CredentialStore,
@@ -352,6 +353,23 @@ async function handle(
   }
   const authed: RequestContext = { ...context, user, token: actor!.token };
 
+  // Before any route runs: a token bound to one project must not reach another
+  // project's data, and refusing here rather than inside each handler is what
+  // keeps a new route from being the exception (D9).
+  const trespass = projectTrespass(request, url, authed);
+  if (trespass !== null) {
+    await recordDenial(authed, {
+      capability: "issue:read",
+      scope: null,
+      role: user.role,
+      project: trespass,
+    });
+    return respondError(
+      response, 403, "E_PROJECT_SCOPE",
+      `This token is scoped to ${authed.token!.projectScope} and may not reach ${trespass}.`,
+    );
+  }
+
   if (route === "GET /stream") {
     const token = sessionToken(request)!;
     const session = context.store.touchSession(token);
@@ -394,10 +412,12 @@ async function handle(
     );
   }
   if (route === "GET /issues") {
-    return listIssuesRoute(url, response, authed);
+    return guard(response, authed, "issue:read", "issue:read", () =>
+      listIssuesRoute(url, response, authed),
+    );
   }
   if (route === "POST /issues") {
-    return guard(response, authed, "issue:write", () =>
+    return guard(response, authed, "issue:write", "issue:edit", () =>
       withIdempotency(request, response, authed, (idempotency) =>
         createIssueRoute(request, response, authed, idempotency),
       ),
@@ -407,7 +427,7 @@ async function handle(
     const key = decodeURIComponent(
       url.pathname.slice("/issues/".length, -"/transitions".length),
     );
-    return guard(response, authed, "issue:write", () =>
+    return guard(response, authed, "issue:write", "issue:transition", () =>
       transitionRoute(key, request, response, authed),
     );
   }
@@ -415,13 +435,13 @@ async function handle(
     const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/rank".length));
     // Its own capability, not `issue:write`: an agent may edit an issue without
     // being allowed to decide what the team works on next (D9).
-    return guard(response, authed, "issue:rank", () =>
+    return guard(response, authed, "issue:rank", "issue:rank", () =>
       rankRoute(key, request, response, authed),
     );
   }
   if (request.method === "POST" && url.pathname.endsWith("/links")) {
     const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/links".length));
-    return guard(response, authed, "issue:write", () =>
+    return guard(response, authed, "issue:write", "issue:edit", () =>
       addLinkRoute(key, request, response, authed),
     );
   }
@@ -430,12 +450,12 @@ async function handle(
       .slice("/issues/".length)
       .split("/links/")
       .map((part) => decodeURIComponent(part));
-    return guard(response, authed, "issue:write", () =>
+    return guard(response, authed, "issue:write", "issue:edit", () =>
       removeLinkRoute(key, id, request, response, authed),
     );
   }
   if (request.method === "DELETE" && url.pathname.startsWith("/issues/")) {
-    return guard(response, authed, "issue:delete", () =>
+    return guard(response, authed, "issue:delete", "issue:delete", () =>
       deleteRoute(
         decodeURIComponent(url.pathname.slice("/issues/".length)),
         request,
@@ -448,7 +468,7 @@ async function handle(
     (request.method === "PUT" || request.method === "PATCH") &&
     url.pathname.startsWith("/issues/")
   ) {
-    return guard(response, authed, "issue:write", () =>
+    return guard(response, authed, "issue:write", "issue:edit", () =>
       updateIssueRoute(
         decodeURIComponent(url.pathname.slice("/issues/".length)),
         request,
@@ -471,7 +491,7 @@ async function handle(
     return showIssueRoute(rest, response, authed);
   }
   if (route === "GET /rekeys") {
-    return guard(response, authed, "issue:read", () => {
+    return guard(response, authed, "issue:read", "issue:read", () => {
       // Read from the event log rather than a table: a rekey is a thing that
       // happened, and the events are the record of what happened (§5.3).
       const rows = authed.board.db
@@ -501,7 +521,7 @@ async function handle(
   // ── sprints (r05a) ────────────────────────────────────────────────────
   const sprintCollection = /^\/projects\/([^/]+)\/sprints$/.exec(url.pathname);
   if (sprintCollection && request.method === "GET") {
-    return guard(response, authed, "issue:read", () => {
+    return guard(response, authed, "issue:read", "issue:read", () => {
       const status = url.searchParams.get("status");
       respondJson(response, 200, {
         sprints: listSprints(authed.board, decodeURIComponent(sprintCollection[1]), status ?? undefined),
@@ -509,14 +529,14 @@ async function handle(
     });
   }
   if (sprintCollection && request.method === "POST") {
-    return guard(response, authed, "sprint:write", () =>
+    return guard(response, authed, "sprint:write", null, () =>
       createSprintRoute(decodeURIComponent(sprintCollection[1]), request, response, authed),
     );
   }
 
   const boardRoute = /^\/projects\/([^/]+)\/board$/.exec(url.pathname);
   if (boardRoute && request.method === "GET") {
-    return guard(response, authed, "issue:read", () =>
+    return guard(response, authed, "issue:read", "issue:read", () =>
       respondBoard(decodeURIComponent(boardRoute[1]), response, authed),
     );
   }
@@ -524,7 +544,7 @@ async function handle(
   const sprintCommand = /^\/sprints\/([^/]+)\/(start|close)$/.exec(url.pathname);
   if (sprintCommand && request.method === "POST") {
     const id = decodeURIComponent(sprintCommand[1]);
-    return guard(response, authed, "sprint:write", () =>
+    return guard(response, authed, "sprint:write", null, () =>
       sprintCommand[2] === "start"
         ? startSprintRoute(id, response, authed)
         : closeSprintRoute(id, request, response, authed),
@@ -533,7 +553,7 @@ async function handle(
 
   const sprintPlan = /^\/sprints\/([^/]+)\/plan$/.exec(url.pathname);
   if (sprintPlan && request.method === "GET") {
-    return guard(response, authed, "issue:read", () => {
+    return guard(response, authed, "issue:read", "issue:read", () => {
       const plan = planOf(authed.board, decodeURIComponent(sprintPlan[1]));
       if (plan === null) {
         return respondError(response, 404, "E_SPRINT_NOT_FOUND", "No such sprint.");
@@ -544,7 +564,7 @@ async function handle(
 
   const sprintIssues = /^\/sprints\/([^/]+)\/issues$/.exec(url.pathname);
   if (sprintIssues && request.method === "POST") {
-    return guard(response, authed, "issue:write", () =>
+    return guard(response, authed, "issue:write", "issue:edit", () =>
       moveIssuesRoute(decodeURIComponent(sprintIssues[1]), request, response, authed),
     );
   }
@@ -553,7 +573,7 @@ async function handle(
   if (sprintItem) {
     const id = decodeURIComponent(sprintItem[1]);
     if (request.method === "GET") {
-      return guard(response, authed, "issue:read", () => {
+      return guard(response, authed, "issue:read", "issue:read", () => {
         const sprint = findSprint(authed.board, id);
         if (sprint === null) {
           return respondError(response, 404, "E_SPRINT_NOT_FOUND", `No sprint with id ${id}`);
@@ -562,19 +582,19 @@ async function handle(
       });
     }
     if (request.method === "PATCH") {
-      return guard(response, authed, "sprint:write", () =>
+      return guard(response, authed, "sprint:write", null, () =>
         updateSprintRoute(id, request, response, authed),
       );
     }
     if (request.method === "DELETE") {
-      return guard(response, authed, "sprint:write", () =>
+      return guard(response, authed, "sprint:write", null, () =>
         deleteSprintRoute(id, request, response, authed),
       );
     }
   }
 
   if (route === "GET /git/status") {
-    return guard(response, authed, "issue:read", () => {
+    return guard(response, authed, "issue:read", "issue:read", () => {
       // Read-only, and local-only: N4 says the tool works offline, so nothing
       // here fetches. D4 says the service never commits or pushes, so there is
       // no companion endpoint that would.
@@ -582,18 +602,18 @@ async function handle(
     });
   }
   if (route === "GET /index") {
-    return guard(response, authed, "issue:read", () => {
+    return guard(response, authed, "issue:read", "issue:read", () => {
       respondJson(response, 200, indexReport(authed));
     });
   }
   if (route === "POST /index/rebuild") {
-    return guard(response, authed, "index:rebuild", () => rebuildRoute(response, authed));
+    return guard(response, authed, "index:rebuild", null, () => rebuildRoute(response, authed));
   }
   if (route === "POST /index/verify") {
-    return guard(response, authed, "index:verify", () => verifyRoute(response, authed));
+    return guard(response, authed, "index:verify", null, () => verifyRoute(response, authed));
   }
   if (route === "GET /integrity/issues") {
-    return guard(response, authed, "issue:read", () => {
+    return guard(response, authed, "issue:read", "issue:read", () => {
       const health = boardHealth(authed.board.db);
       respondJson(response, 200, {
         quarantined: quarantineList(authed.board.db),
@@ -718,8 +738,13 @@ function listIssuesRoute(
 
   const query = url.searchParams.get("q");
   const cursor = url.searchParams.get("after");
+  // A project-scoped token gets its own project, not a refusal: a collection
+  // names no project, and an agent asking what work exists should be answered
+  // rather than told off (S3-D9). Overriding rather than merging, so asking for
+  // another project returns that project's nothing instead of everything.
+  const bound = context.token?.projectScope ?? null;
   const page = listIssues(context.board, {
-    project: url.searchParams.get("project") ?? undefined,
+    project: bound ?? url.searchParams.get("project") ?? undefined,
     status,
     type,
     assignee: many("assignee"),
@@ -763,6 +788,51 @@ function listIssuesRoute(
     // what the screen actually holds.
     points: issues.reduce((total, issue) => total + (issue.points ?? 0), 0),
   });
+}
+
+/**
+ * The project a request reaches into, when the URL names one.
+ *
+ * Returns the offending project, or null when the request is within scope.
+ * Keys carry their project as a prefix (`LJ-12`, `LJ-S1`), which is what makes
+ * this answerable from the URL alone — before the handler, and without a
+ * lookup that a quarantined or missing row could refuse.
+ *
+ * A collection request (`GET /issues`) names no project; the list route narrows
+ * itself to the token's project instead of being refused, because an agent
+ * asking "what is there" should get its own project rather than an error
+ * (S3-D9).
+ */
+function projectTrespass(
+  request: http.IncomingMessage,
+  url: URL,
+  context: RequestContext,
+): string | null {
+  const bound = context.token?.projectScope;
+  if (!bound) {
+    return null;
+  }
+
+  const named =
+    /^\/projects\/([^/]+)(?:\/|$)/.exec(url.pathname)?.[1] ??
+    keyPrefix(/^\/issues\/([^/]+)/.exec(url.pathname)?.[1]) ??
+    keyPrefix(/^\/sprints\/([^/]+)/.exec(url.pathname)?.[1]);
+
+  if (named === null || named === undefined) {
+    return null;
+  }
+  const project = decodeURIComponent(named);
+  void request;
+  return project === bound ? null : project;
+}
+
+/** `LJ-12` and `LJ-S1` both belong to `LJ`. */
+function keyPrefix(key: string | undefined): string | null {
+  if (key === undefined) {
+    return null;
+  }
+  const found = /^([^-]+)-/.exec(decodeURIComponent(key));
+  return found ? found[1] : null;
 }
 
 /**
@@ -948,7 +1018,7 @@ async function createIssueRoute(
         status: typeof body.status === "string" ? body.status : undefined,
         idempotency,
       },
-      { id: context.user!.id, kind: context.user!.role === "agent" ? "agent" : "human" },
+      actorOf(context),
     );
 
     response.setHeader("Location", `/issues/${issue.key}`);
@@ -1005,7 +1075,7 @@ async function updateIssueRoute(
         description: typeof body.description === "string" ? body.description : undefined,
         status: typeof body.status === "string" ? body.status : undefined,
       },
-      { id: context.user!.id, kind: context.user!.role === "agent" ? "agent" : "human" },
+      actorOf(context),
     );
 
     if (result.changed) {
@@ -1017,6 +1087,23 @@ async function updateIssueRoute(
   }
 }
 
+/** The three an agent may not reach on scope alone (§6.1, ADR-004 §2). */
+const CLAIM_GATED = new Set(["IN_PROGRESS", "IN_REVIEW", "DONE"]);
+
+/**
+ * Whether this actor holds a live claim on the issue.
+ *
+ * Claims arrive with r16a; until then nobody holds one, which is the truthful
+ * answer and not a placeholder — an agent cannot start work it has not been
+ * able to reserve. r16a replaces the body of this function and the gate above
+ * keeps working unchanged.
+ */
+function holdsClaim(context: RequestContext, key: string): boolean {
+  void context;
+  void key;
+  return false;
+}
+
 async function transitionRoute(
   key: string,
   request: http.IncomingMessage,
@@ -1024,6 +1111,23 @@ async function transitionRoute(
   context: RequestContext,
 ): Promise<void> {
   const body = await readJson(request);
+
+  const to = String(body.to ?? "");
+  if (actorOf(context).kind === "agent" && CLAIM_GATED.has(to) && !holdsClaim(context, key)) {
+    await recordDenial(context, {
+      capability: "issue:write",
+      scope: "issue:transition",
+      role: context.user!.role,
+    });
+    // §6.1: holding `issue:transition` is not enough. Two agents that both had
+    // the scope would otherwise both start the same issue, which is the exact
+    // duplicate-work claims exist to prevent (AC19).
+    return respondError(
+      response, 403, "E_CLAIM_REQUIRED",
+      `Moving an issue to ${to} needs a claim held by this agent.`,
+      "Claim the issue first: POST /issues/{key}/claim",
+    );
+  }
 
   try {
     const result = await transitionIssue(
@@ -1108,21 +1212,37 @@ async function guard(
   response: http.ServerResponse,
   context: RequestContext,
   capability: Capability,
+  scope: TokenScope | null,
   body: () => Promise<void> | void,
 ): Promise<void> {
-  // A token authenticates (r13a) before anything maps its scopes to routes
-  // (r13b). Until that map exists a token may only read: a token whose scopes
-  // nobody is checking must not be able to do more than the narrowest of them,
-  // and the safe direction to be wrong in is closed. r13b replaces this line
-  // with the real scope check rather than adding a second one beside it.
-  if (context.token && capability !== "issue:read") {
-    return respondError(
-      response,
-      403,
-      "E_TOKEN_SCOPE",
-      `This token may not ${capability.replace(":", " ")}.`,
-      `Required scope for: ${capability}`,
-    );
+  // Two axes, checked in order. A role says what a person may do; a token's
+  // scopes say what that person's token may do on their behalf, and a token can
+  // never exceed the account it belongs to. `null` means no scope in §6.4's
+  // fixed seven covers this route, so no token reaches it at all — restructuring
+  // sprints and rebuilding the index are operating the board, not using it.
+  if (context.token) {
+    // The token's scopes are the authority here, not the role's capabilities.
+    // The `agent` role deliberately grants nothing but reading (D9) precisely
+    // so that a token's scopes decide — checking both would mean the role
+    // silently overrules the scope it was written to defer to. No scope in the
+    // seven exceeds what a `member` may do, so this cannot widen an account.
+    if (scope === null || !context.token.scopes.includes(scope)) {
+      await recordDenial(context, {
+        capability,
+        scope,
+        role: context.user!.role,
+      });
+      return respondError(
+        response,
+        403,
+        "E_TOKEN_SCOPE",
+        scope === null
+          ? `No token scope permits ${capability.replace(":", " ")}.`
+          : `This token does not hold ${scope}.`,
+        scope === null ? "Use a signed-in session." : `Required scope: ${scope}`,
+      );
+    }
+    return body();
   }
 
   try {
@@ -1160,7 +1280,7 @@ async function createTokenRoute(
   response: http.ServerResponse,
   context: RequestContext,
 ): Promise<void> {
-  return guard(response, context, "token:manage", async () => {
+  return guard(response, context, "token:manage", null, async () => {
     const body = await readJson(request);
     const subject = typeof body.user === "string" ? body.user : context.user!.id;
 
@@ -1250,7 +1370,7 @@ async function revokeTokenRoute(
   response: http.ServerResponse,
   context: RequestContext,
 ): Promise<void> {
-  return guard(response, context, "token:manage", async () => {
+  return guard(response, context, "token:manage", null, async () => {
     const record = context.store.findToken(tokenId);
     if (!record) {
       return respondError(response, 404, "E_UNKNOWN_TOKEN", `No token ${tokenId}.`);
@@ -1321,7 +1441,7 @@ async function createUserRoute(
   response: http.ServerResponse,
   context: RequestContext,
 ): Promise<void> {
-  return guard(response, context, "user:manage", async () => {
+  return guard(response, context, "user:manage", null, async () => {
     const body = await readJson(request);
     try {
       const user = createUser(context.board, {
@@ -1353,7 +1473,7 @@ async function changeRoleRoute(
   response: http.ServerResponse,
   context: RequestContext,
 ): Promise<void> {
-  return guard(response, context, "user:manage", async () => {
+  return guard(response, context, "user:manage", null, async () => {
     const body = await readJson(request);
     try {
       const change = changeRole(context.board, userId, String(body.role ?? "") as Role);
@@ -1396,11 +1516,48 @@ async function recordEvent(
   });
 }
 
-function actorOf(context: RequestContext): { id: string; kind: "human" | "agent" } {
+function actorOf(context: RequestContext): {
+  id: string;
+  kind: "human" | "agent";
+  tokenId: string | null;
+} {
   return {
     id: context.user!.id,
     kind: context.user!.role === "agent" ? "agent" : "human",
+    // Carried on every write an agent makes, so AC16's "성공·거부 양쪽 모두
+    // token_id와 함께" holds for the success half without each route
+    // remembering to add it.
+    tokenId: context.token?.tokenId ?? null,
   };
+}
+
+/**
+ * Records a refusal.
+ *
+ * AC16 audits denials as well as successes: knowing a token was stopped, and
+ * which one, is how a misbehaving agent is found. Kept out of the read path —
+ * N7 excludes reads, and an agent polling a route it cannot use would otherwise
+ * become the loudest writer on the board.
+ */
+async function recordDenial(
+  context: RequestContext,
+  detail: { capability: Capability; scope: TokenScope | null; role: string; project?: string },
+): Promise<void> {
+  if (detail.scope === "issue:read") {
+    return;
+  }
+  await recordEvent(context, {
+    verb: "access.denied",
+    targetKind: "board",
+    targetUid: null,
+    actor: actorOf(context),
+    detail: {
+      capability: detail.capability,
+      scope: detail.scope,
+      role: detail.role,
+      ...(detail.project === undefined ? {} : { project: detail.project }),
+    },
+  });
 }
 
 function headerValue(request: http.IncomingMessage, name: string): string | null {

@@ -41,6 +41,8 @@ export interface EventActor {
   /** The person who directed an agent, when this was delegated (§6.2). */
   initiatedBy?: string | null;
   runId?: string | null;
+  /** The PAT that made the request, when one did. Never the token itself (N6). */
+  tokenId?: string | null;
 }
 
 export interface EventInput {
@@ -82,6 +84,10 @@ export function buildEvent(localDirectory: string, input: EventInput): BuiltEven
     actor_kind: input.actor.kind,
     run_id: input.actor.runId ?? null,
     initiated_by: input.actor.initiatedBy ?? null,
+    // AC16 wants successes and refusals alike traceable to the token that made
+    // them, which a user id cannot do: one account may hold several tokens, and
+    // revoking the right one means knowing which was used.
+    token_id: input.actor.tokenId ?? null,
     target_kind: input.targetKind,
     target_uid: input.targetUid,
     verb: input.verb,
