@@ -133,6 +133,19 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   const store = new CredentialStore(board.localDirectory);
   store.purgeExpired();
 
+  // After the replay, so "did this key produce anything" is answered against a
+  // finished journal. A reservation that never reached the journal is released;
+  // one that did is kept, because the resource it names now exists and a retry
+  // must be answered from it rather than creating a second (r15 AC10).
+  writable.outbox.purgeIdempotency();
+  const orphans = writable.outbox.resolveOrphanedIdempotency();
+  if (orphans.released > 0 || orphans.kept > 0) {
+    process.stderr.write(
+      `localjira: ${orphans.released} idempotency key(s) released, ` +
+        `${orphans.kept} kept for a write that landed\n`,
+    );
+  }
+
   if (writable.replay.replayed > 0) {
     process.stderr.write(
       `localjira: replayed ${writable.replay.replayed} unfinished write(s) ` +
@@ -385,7 +398,9 @@ async function handle(
   }
   if (route === "POST /issues") {
     return guard(response, authed, "issue:write", () =>
-      createIssueRoute(request, response, authed),
+      withIdempotency(request, response, authed, (idempotency) =>
+        createIssueRoute(request, response, authed, idempotency),
+      ),
     );
   }
   if (request.method === "POST" && url.pathname.endsWith("/transitions")) {
@@ -750,10 +765,166 @@ function listIssuesRoute(
   });
 }
 
+/**
+ * A key is 1–255 printable ASCII (S3-D4).
+ *
+ * Bounded because it becomes a primary key, and restricted to printable ASCII
+ * because a header carrying control bytes is a client bug worth naming rather
+ * than storing.
+ */
+const IDEMPOTENCY_KEY = /^[\x20-\x7e]{1,255}$/;
+
+/**
+ * Makes a create request safe to retry (PRD §5.4).
+ *
+ * Wraps the handler rather than living inside it, so every create gets the
+ * same treatment and a new one cannot forget. The response is captured off the
+ * wire, which means what a retry replays is exactly what the first caller saw
+ * — including the ETag — rather than a second rendering of the same resource.
+ */
+async function withIdempotency(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+  run: (idempotency?: { actorId: string; key: string }) => Promise<void>,
+): Promise<void> {
+  const key = headerValue(request, "idempotency-key");
+  if (key === null) {
+    // Optional, and without one there is no retry protection. That is the
+    // caller's choice to make (r15 AC2).
+    return run();
+  }
+  if (!IDEMPOTENCY_KEY.test(key)) {
+    return respondError(
+      response, 400, "E_INVALID_IDEMPOTENCY_KEY",
+      "Idempotency-Key must be 1–255 printable ASCII characters.",
+    );
+  }
+
+  const actorId = context.user!.id;
+  const requestHash = createHash("sha256")
+    // Canonical JSON, so the same request spelled with different key order or
+    // whitespace is recognised as the same request.
+    .update(canonicalJson((await readJson(request)) as never))
+    .digest("hex");
+
+  const claim = context.writable.outbox.reserveIdempotency(actorId, key, requestHash);
+
+  if (claim.outcome === "mismatch") {
+    // S3-D4: replaying the first response here would drop this request on the
+    // floor while telling the caller it succeeded.
+    return respondError(
+      response, 409, "E_IDEMPOTENCY_KEY_REUSED",
+      "That Idempotency-Key was used for a different request.",
+      `First request fingerprint: ${claim.held.requestHash.slice(0, 16)}`,
+    );
+  }
+  if (claim.outcome === "in_progress") {
+    return respondError(
+      response, 409, "E_IDEMPOTENCY_IN_PROGRESS",
+      "That Idempotency-Key is still being processed.",
+      "Retry once the first request has answered.",
+    );
+  }
+  if (claim.outcome === "replay") {
+    return replayIdempotent(response, claim.held, context);
+  }
+
+  const captured = captureResponse(response);
+  try {
+    await run({ actorId, key });
+  } catch (error) {
+    context.writable.outbox.releaseIdempotency(actorId, key);
+    throw error;
+  }
+
+  const result = captured();
+  if (result === null || result.status >= 400) {
+    // A refused request has not produced anything to replay, and holding the
+    // key would stop the caller from retrying with a corrected body.
+    context.writable.outbox.releaseIdempotency(actorId, key);
+    return;
+  }
+  context.writable.outbox.completeIdempotency(actorId, key, result);
+}
+
+/**
+ * Answers a repeat of a request that already succeeded.
+ *
+ * Two ways in. Normally the stored response is replayed verbatim. After a
+ * crash between the write and the response there is no stored body, only the
+ * path the write journal recorded — and re-reading that resource is what keeps
+ * the retry from creating a second one (AC10).
+ */
+function replayIdempotent(
+  response: http.ServerResponse,
+  held: IdempotencyRecord,
+  context: RequestContext,
+): void {
+  if (held.body !== null && held.status !== null) {
+    response.writeHead(held.status, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": Buffer.byteLength(held.body),
+      ...(held.etag ? { ETag: held.etag } : {}),
+    });
+    return void response.end(held.body);
+  }
+
+  const key = held.targetPath === null ? null : issueKeyOf(held.targetPath);
+  const found = key === null ? null : findIssue(context.board, key);
+  if (!found || !("issue" in found)) {
+    return respondError(
+      response, 409, "E_IDEMPOTENCY_IN_PROGRESS",
+      "That Idempotency-Key belongs to a request whose result cannot be read back.",
+    );
+  }
+  respondResource(response, 201, found.issue.resource as JsonValue, found.issue.etag);
+}
+
+function issueKeyOf(targetPath: string): string | null {
+  return /^issues\/[^/]+\/([^/]+)\.md$/.exec(targetPath)?.[1] ?? null;
+}
+
+/**
+ * Records the status, body and ETag a handler writes.
+ *
+ * By wrapping the socket rather than asking each route to report what it sent,
+ * so a route that answers through some other helper is captured too.
+ */
+function captureResponse(
+  response: http.ServerResponse,
+): () => { status: number; body: string; etag: string | null } | null {
+  const writeHead = response.writeHead.bind(response);
+  const end = response.end.bind(response);
+  let status = 0;
+  let etag: string | null = null;
+  const chunks: Buffer[] = [];
+
+  response.writeHead = ((code: number, headers?: Record<string, unknown>) => {
+    status = code;
+    const found = headers?.ETag ?? headers?.etag;
+    etag = typeof found === "string" ? found : null;
+    return writeHead(code, headers as never);
+  }) as typeof response.writeHead;
+
+  response.end = ((chunk?: unknown, ...rest: unknown[]) => {
+    if (typeof chunk === "string") {
+      chunks.push(Buffer.from(chunk, "utf8"));
+    } else if (Buffer.isBuffer(chunk)) {
+      chunks.push(chunk);
+    }
+    return end(chunk as never, ...(rest as []));
+  }) as typeof response.end;
+
+  return () =>
+    status === 0 ? null : { status, body: Buffer.concat(chunks).toString("utf8"), etag };
+}
+
 async function createIssueRoute(
   request: http.IncomingMessage,
   response: http.ServerResponse,
   context: RequestContext,
+  idempotency?: { actorId: string; key: string },
 ): Promise<void> {
   const body = await readJson(request);
 
@@ -775,6 +946,7 @@ async function createIssueRoute(
             )
           : [],
         status: typeof body.status === "string" ? body.status : undefined,
+        idempotency,
       },
       { id: context.user!.id, kind: context.user!.role === "agent" ? "agent" : "human" },
     );
@@ -2076,18 +2248,34 @@ function cookie(token: string, expiresAt: number): string {
   return `${SESSION_COOKIE}=${token}; Path=/; Max-Age=${maxAge}; HttpOnly; SameSite=Strict`;
 }
 
-async function readJson(
-  request: http.IncomingMessage,
-): Promise<Record<string, unknown>> {
+/** Where a body already read off the stream is kept, so it can be read twice. */
+const BUFFERED = Symbol("buffered-body");
+
+async function readBody(request: http.IncomingMessage): Promise<Buffer> {
+  const already = (request as never as Record<symbol, Buffer | undefined>)[BUFFERED];
+  if (already !== undefined) {
+    return already;
+  }
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     chunks.push(chunk as Buffer);
   }
-  if (chunks.length === 0) {
+  const body = Buffer.concat(chunks);
+  // The idempotency wrapper has to hash the request before the handler parses
+  // it, and a stream can only be consumed once.
+  (request as never as Record<symbol, Buffer>)[BUFFERED] = body;
+  return body;
+}
+
+async function readJson(
+  request: http.IncomingMessage,
+): Promise<Record<string, unknown>> {
+  const raw = await readBody(request);
+  if (raw.length === 0) {
     return {};
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+    return JSON.parse(raw.toString("utf8")) as Record<string, unknown>;
   } catch {
     return {};
   }
