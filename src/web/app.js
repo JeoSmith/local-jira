@@ -29,6 +29,7 @@ $("#project-filter").addEventListener("change", renderBoard);
 $("#detail-close").addEventListener("click", closeDetail);
 $("#integrity-banner").addEventListener("click", toggleIntegrity);
 $("#settings-toggle").addEventListener("click", toggleSettings);
+$("#token-form").addEventListener("submit", issueToken);
 $("#git-badge").addEventListener("click", toggleGitPanel);
 $("#view-board").addEventListener("click", () => void switchView("board"));
 $("#view-backlog").addEventListener("click", () => void switchView("backlog"));
@@ -935,7 +936,115 @@ async function refreshIndexFacts() {
   // A run already in flight has to be visible, or the only way to find out is
   // to press the button again (AC).
   setIndexBusy(payload.running);
+  await refreshTokens();
   await refreshRekeys();
+}
+
+/**
+ * The PAT list.
+ *
+ * `last_used_at` is a column here rather than a detail because S3-D7 allows
+ * tokens that never expire — when expiry does not retire anything, the last
+ * use is the only way an abandoned credential becomes visible.
+ */
+async function refreshTokens() {
+  let payload;
+  try {
+    payload = await api("/tokens");
+  } catch {
+    return;
+  }
+
+  const list = $("#token-list");
+  list.replaceChildren();
+  $("#token-empty").hidden = payload.tokens.length > 0;
+
+  for (const token of payload.tokens) {
+    const item = element("li");
+    const head = element("div", "entry-head");
+    head.append(element("span", "entry-verb", token.name || "이름 없음"));
+    if (token.revoked_at) head.append(element("span", "token-revoked", "폐기됨"));
+    head.append(element("span", "entry-at", `${token.user} · ${token.token_id}`));
+    item.append(head);
+
+    const facts = element("div", "entry-actor");
+    facts.append(
+      element("span", "", `scope ${token.scopes.length ? token.scopes.join(" · ") : "없음"}`),
+    );
+    facts.append(element("span", "token-sep", " | "));
+    // Never an empty cell: an unlimited token has to read as a decision
+    // somebody made, not as a date that failed to render (S3-D7).
+    facts.append(
+      token.expires_at
+        ? element("span", "", `만료 ${formatAt(token.expires_at)}`)
+        : element("span", "token-forever", "만료 무기한"),
+    );
+    facts.append(element("span", "token-sep", " | "));
+    facts.append(
+      element(
+        "span",
+        token.last_used_at ? "" : "token-unused",
+        token.last_used_at ? `최근 사용 ${formatAt(token.last_used_at)}` : "사용된 적 없음",
+      ),
+    );
+    if (token.project_scope) {
+      facts.append(element("span", "token-sep", " | "));
+      facts.append(element("span", "", `프로젝트 ${token.project_scope}`));
+    }
+    item.append(facts);
+
+    if (!token.revoked_at) {
+      const revoke = element("button", "token-revoke", "폐기");
+      revoke.type = "button";
+      revoke.addEventListener("click", () => revokeToken(token));
+      item.append(revoke);
+    }
+    list.append(item);
+  }
+}
+
+async function issueToken(event) {
+  event.preventDefault();
+  const name = $("#token-name").value.trim();
+  const days = $("#token-expiry").value;
+
+  let issued;
+  try {
+    issued = await api("/tokens", {
+      method: "POST",
+      body: {
+        ...(name ? { name } : {}),
+        // "" is the unlimited option, and null is how the API spells it. Not
+        // sending the field would mean "use the default" instead (S3-D7).
+        expires_in_days: days === "" ? null : Number(days),
+      },
+    });
+  } catch (error) {
+    return void announce(`토큰을 발급하지 못했습니다: ${error.message}`);
+  }
+
+  const box = $("#token-secret");
+  box.replaceChildren();
+  box.append(element("strong", "", "이 값은 다시 볼 수 없습니다. 지금 복사하세요."));
+  box.append(element("code", "token-value", issued.token));
+  box.hidden = false;
+  $("#token-name").value = "";
+  announce(`토큰${josaEul("토큰")} 발급했습니다. 값은 이 화면에서만 볼 수 있습니다.`);
+  await refreshTokens();
+}
+
+async function revokeToken(token) {
+  const label = token.name || token.token_id;
+  if (!confirm(`토큰 "${label}"${josaEul(label)} 폐기합니다. 이 토큰을 쓰는 에이전트는 즉시 끊깁니다.`)) {
+    return;
+  }
+  try {
+    await api(`/tokens/${encodeURIComponent(token.token_id)}`, { method: "DELETE" });
+  } catch (error) {
+    return void announce(`폐기하지 못했습니다: ${error.message}`);
+  }
+  announce(`토큰${josaEul("토큰")} 폐기했습니다.`);
+  await refreshTokens();
 }
 
 async function refreshRekeys() {

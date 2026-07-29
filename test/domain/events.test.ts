@@ -168,6 +168,27 @@ test("strips anything secret before it can reach a file", () => {
   assert.deepEqual(redacted, { id: "admin", role: "admin", nested: { display_name: "관리자" } });
 });
 
+test("token_id survives, and a list stays a list", () => {
+  const redacted = redact({
+    token_id: "01JTOKEN",
+    token: "ljp_secret",
+    token_hash: "deadbeef",
+    scopes: ["issue:read", "run:write"],
+    grants: [{ scope: "issue:edit", token_hash: "nope" }],
+  }) as Record<string, unknown>;
+
+  // A revocation that cannot name what it revoked is not an audit trail
+  // (r13a AC9) — but the value itself still has to go.
+  assert.equal(redacted.token_id, "01JTOKEN");
+  assert.equal("token" in redacted, false);
+  assert.equal("token_hash" in redacted, false);
+
+  // Arrays used to come out as {"0":…,"1":…} because typeof [] is "object".
+  // A record that changes the shape of what it recorded is not a record of it.
+  assert.deepEqual(redacted.scopes, ["issue:read", "run:write"]);
+  assert.deepEqual(redacted.grants, [{ scope: "issue:edit" }], "elements are still scrubbed");
+});
+
 // ── coverage of the audit scope ─────────────────────────────────────────────
 
 test("records one event per auditable action", async (t) => {

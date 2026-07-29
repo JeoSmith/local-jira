@@ -4,8 +4,20 @@ import fs from "node:fs";
 import type { AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 
-import { AuthorizationError, require as requireCapability, type Capability } from "../auth/authorize.ts";
-import { CredentialStore } from "../auth/credentials.ts";
+import {
+  AuthorizationError,
+  canManageTokensFor,
+  DEFAULT_AGENT_SCOPES,
+  isTokenScope,
+  require as requireCapability,
+  TOKEN_SCOPES,
+  type Capability,
+} from "../auth/authorize.ts";
+import {
+  CredentialStore,
+  TOKEN_DEFAULT_TTL_MS,
+  type TokenRecord,
+} from "../auth/credentials.ts";
 import { createIssue, ISSUE_TYPES, IssueError } from "../domain/issue.ts";
 import {
   addLink,
@@ -98,6 +110,8 @@ interface RequestContext {
   store: CredentialStore;
   stream: EventStream;
   user: UserRecord | null;
+  /** Set when a PAT authenticated this request rather than a browser session. */
+  token?: TokenRecord | null;
   reconcile(reason?: ReconcileReason | null): Promise<void>;
   /** False when the write queue waited out its limit and should 503. */
   awaitWriteGate(): Promise<boolean>;
@@ -311,7 +325,8 @@ async function handle(
   }
 
   // Everything below is a domain route, so it needs an authenticated actor.
-  const user = resolveUser(request, context);
+  const actor = resolveActor(request, context);
+  const user = actor?.user ?? null;
   if (!user) {
     return respondError(
       response,
@@ -322,7 +337,7 @@ async function handle(
         : "Sign in first.",
     );
   }
-  const authed: RequestContext = { ...context, user };
+  const authed: RequestContext = { ...context, user, token: actor!.token };
 
   if (route === "GET /stream") {
     const token = sessionToken(request)!;
@@ -348,6 +363,19 @@ async function handle(
     return changeRoleRoute(
       decodeURIComponent(url.pathname.slice("/users/".length, -"/role".length)),
       request,
+      response,
+      authed,
+    );
+  }
+  if (route === "GET /tokens") {
+    return listTokensRoute(response, authed);
+  }
+  if (route === "POST /tokens") {
+    return createTokenRoute(request, response, authed);
+  }
+  if (request.method === "DELETE" && url.pathname.startsWith("/tokens/")) {
+    return revokeTokenRoute(
+      decodeURIComponent(url.pathname.slice("/tokens/".length)),
       response,
       authed,
     );
@@ -910,6 +938,21 @@ async function guard(
   capability: Capability,
   body: () => Promise<void> | void,
 ): Promise<void> {
+  // A token authenticates (r13a) before anything maps its scopes to routes
+  // (r13b). Until that map exists a token may only read: a token whose scopes
+  // nobody is checking must not be able to do more than the narrowest of them,
+  // and the safe direction to be wrong in is closed. r13b replaces this line
+  // with the real scope check rather than adding a second one beside it.
+  if (context.token && capability !== "issue:read") {
+    return respondError(
+      response,
+      403,
+      "E_TOKEN_SCOPE",
+      `This token may not ${capability.replace(":", " ")}.`,
+      `Required scope for: ${capability}`,
+    );
+  }
+
   try {
     requireCapability(context.user!.role, capability);
   } catch (error) {
@@ -932,6 +975,173 @@ async function guard(
     throw error;
   }
   await body();
+}
+
+/**
+ * Issues a PAT.
+ *
+ * The plaintext appears in this response and nowhere else, ever — there is no
+ * route that can produce it again because nothing stores it (r13a AC2).
+ */
+async function createTokenRoute(
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  return guard(response, context, "token:manage", async () => {
+    const body = await readJson(request);
+    const subject = typeof body.user === "string" ? body.user : context.user!.id;
+
+    // S3-D8: a member issues for themselves; issuing under someone else's name
+    // is an admin act, because the token's actions will be audited as theirs.
+    if (!canManageTokensFor(context.user!, subject)) {
+      await recordEvent(context, {
+        verb: "access.denied",
+        targetKind: "board",
+        targetUid: null,
+        actor: { id: context.user!.id, kind: "human" },
+        detail: { capability: "token:manage", role: context.user!.role, subject },
+      });
+      return respondError(
+        response, 403, "E_FORBIDDEN",
+        "Only an admin may issue a token for another account.",
+        "Omit `user` to issue one for yourself.",
+      );
+    }
+
+    if (!listUsers(context.board).some((entry) => entry.id === subject)) {
+      return respondError(response, 400, "E_UNKNOWN_USER", `No user ${subject}.`);
+    }
+
+    const requested = Array.isArray(body.scopes)
+      ? body.scopes.map(String)
+      : [...DEFAULT_AGENT_SCOPES];
+    const invalid = requested.filter((scope) => !isTokenScope(scope));
+    if (invalid.length > 0) {
+      return respondError(
+        response, 400, "E_INVALID_SCOPE",
+        `Not a scope: ${invalid.join(", ")}.`,
+        `Allowed: ${TOKEN_SCOPES.join(", ")}`,
+      );
+    }
+
+    let expiresAt: number | null;
+    try {
+      expiresAt = resolveExpiry(body.expires_in_days);
+    } catch (error) {
+      return respondError(response, 400, "E_INVALID_EXPIRY", (error as Error).message);
+    }
+
+    const issued = context.store.createToken({
+      userId: subject,
+      name: typeof body.name === "string" && body.name.trim() !== "" ? body.name.trim() : null,
+      scopes: requested,
+      projectScope: typeof body.project_scope === "string" ? body.project_scope : null,
+      expiresAt,
+    });
+
+    await recordEvent(context, {
+      verb: "token.issued",
+      targetKind: "user",
+      targetUid: subject,
+      actor: { id: context.user!.id, kind: "human" },
+      // `redact` still runs over this. It keeps `token_id` by name and would
+      // drop the plaintext if a later edit ever put it here (r13a AC9).
+      after: redact({
+        token_id: issued.record.tokenId,
+        user: subject,
+        scopes: issued.record.scopes,
+        project_scope: issued.record.projectScope,
+        expires_at: issued.record.expiresAt,
+      }),
+    });
+
+    respondJson(response, 201, {
+      token: issued.token,
+      ...tokenView(issued.record),
+    });
+  });
+}
+
+function listTokensRoute(response: http.ServerResponse, context: RequestContext): void {
+  // An admin sees every token because revoking a stranger's is their job; a
+  // member sees their own, which is all they may act on anyway (S3-D8).
+  const records =
+    context.user!.role === "admin"
+      ? context.store.listTokens()
+      : context.store.listTokens(context.user!.id);
+  respondJson(response, 200, { tokens: records.map(tokenView) });
+}
+
+async function revokeTokenRoute(
+  tokenId: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  return guard(response, context, "token:manage", async () => {
+    const record = context.store.findToken(tokenId);
+    if (!record) {
+      return respondError(response, 404, "E_UNKNOWN_TOKEN", `No token ${tokenId}.`);
+    }
+    if (!canManageTokensFor(context.user!, record.userId)) {
+      return respondError(
+        response, 403, "E_FORBIDDEN",
+        "Only an admin may revoke another account's token.",
+      );
+    }
+
+    if (!context.store.revokeToken(tokenId)) {
+      // Already revoked. Saying so beats a second event claiming it happened
+      // twice, and the caller's goal — the token is dead — already holds.
+      return respondJson(response, 200, tokenView(context.store.findToken(tokenId)!));
+    }
+
+    await recordEvent(context, {
+      verb: "token.revoked",
+      targetKind: "user",
+      targetUid: record.userId,
+      actor: { id: context.user!.id, kind: "human" },
+      after: redact({ token_id: tokenId, user: record.userId }),
+    });
+
+    respondJson(response, 200, tokenView(context.store.findToken(tokenId)!));
+  });
+}
+
+/** The token as an API response shows it — never the secret. */
+function tokenView(record: TokenRecord): Record<string, unknown> {
+  return {
+    token_id: record.tokenId,
+    user: record.userId,
+    name: record.name,
+    scopes: record.scopes,
+    project_scope: record.projectScope,
+    created_at: new Date(record.createdAt).toISOString(),
+    expires_at: record.expiresAt === null ? null : new Date(record.expiresAt).toISOString(),
+    last_used_at: record.lastUsedAt === null ? null : new Date(record.lastUsedAt).toISOString(),
+    revoked_at: record.revokedAt === null ? null : new Date(record.revokedAt).toISOString(),
+  };
+}
+
+/**
+ * Turns `expires_in_days` into an instant, or null for a token that never
+ * expires (S3-D7). Absent means the default; explicit `null` means unlimited,
+ * and the two are told apart so "I did not say" cannot silently become "never".
+ */
+function resolveExpiry(value: unknown, now: number = Date.now()): number | null {
+  if (value === undefined) {
+    return now + TOKEN_DEFAULT_TTL_MS;
+  }
+  if (value === null) {
+    return null;
+  }
+  const days = Number(value);
+  if (!Number.isFinite(days) || !Number.isInteger(days) || days <= 0) {
+    return (() => {
+      throw new Error("`expires_in_days` must be a positive whole number, or null for no expiry.");
+    })();
+  }
+  return now + days * 24 * 60 * 60 * 1000;
 }
 
 async function createUserRoute(
@@ -1794,10 +2004,31 @@ function showIssueRoute(
   respondResource(response, 200, found.issue.resource as JsonValue, found.issue.etag);
 }
 
-function resolveUser(
+/**
+ * Who is making this request — a signed-in person, or a token.
+ *
+ * Both resolve to a user in `users.yaml`, which is what makes removing someone
+ * from that file end their access by every route at once. A token that names a
+ * user who is no longer there authenticates as nobody.
+ */
+function resolveActor(
   request: http.IncomingMessage,
   context: RequestContext,
-): UserRecord | null {
+): { user: UserRecord; token: TokenRecord | null } | null {
+  const bearer = bearerToken(request);
+  if (bearer !== null) {
+    const found = context.store.resolveToken(bearer);
+    if (!found.ok) {
+      return null;
+    }
+    const user = listUsers(context.board).find((entry) => entry.id === found.record.userId);
+    if (!user) {
+      return null;
+    }
+    context.store.touchToken(found.record.tokenId);
+    return { user, token: found.record };
+  }
+
   const token = sessionToken(request);
   if (!token) {
     return null;
@@ -1806,7 +2037,17 @@ function resolveUser(
   if (!session) {
     return null;
   }
-  return listUsers(context.board).find((user) => user.id === session.userId) ?? null;
+  const user = listUsers(context.board).find((entry) => entry.id === session.userId);
+  return user ? { user, token: null } : null;
+}
+
+function bearerToken(request: http.IncomingMessage): string | null {
+  const header = request.headers.authorization;
+  if (typeof header !== "string") {
+    return null;
+  }
+  const match = /^Bearer\s+(\S+)$/i.exec(header.trim());
+  return match ? match[1] : null;
 }
 
 function sessionToken(request: http.IncomingMessage): string | null {
