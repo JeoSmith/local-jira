@@ -117,9 +117,15 @@ function issueRecords(
       });
 
       const aliases = [key, ...list(front.former_keys).map(str)].filter(Boolean);
+      // Acceptance criteria are searchable too: they carry the words that
+      // describe what the work actually is, and a title rarely repeats them.
+      const acceptance = list(front.acceptance)
+        .map((entry) => str((entry as Row)?.text))
+        .filter(Boolean)
+        .join(" ");
       db.prepare(
-        "INSERT INTO issues_fts(uid, title, body, key_alias) VALUES(?,?,?,?)",
-      ).run(uid, str(front.title) ?? "", parsed.body ?? "", aliases.join(" "));
+        "INSERT INTO issues_fts(uid, title, body, key_alias, acceptance) VALUES(?,?,?,?,?)",
+      ).run(uid, str(front.title) ?? "", parsed.body ?? "", aliases.join(" "), acceptance);
     },
   };
 }

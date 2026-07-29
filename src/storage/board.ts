@@ -274,9 +274,14 @@ export interface ListIssuesOptions {
   /** Excludes issues held up by an unfinished blocker (r02b). */
   claimable?: boolean;
   limit?: number;
+  /** Free text over title, body, acceptance and key aliases. */
+  q?: string;
   /** `(backlog_rank, uid)` of the last row of the previous page. */
   after?: { rank: string | null; uid: string } | null;
 }
+
+/** The shortest term trigram can match. Below this it returns nothing at all. */
+export const MIN_TRIGRAM_TERM = 3;
 
 export interface IssuePage {
   issues: IssueSummary[];
@@ -345,6 +350,10 @@ export function listIssues(
     );
   }
 
+  if (options.q && options.q.trim() !== "") {
+    where.push(searchClause(options.q, params));
+  }
+
   if (options.after) {
     // Strictly after the cursor in the same order the rows come back in.
     where.push(
@@ -391,6 +400,38 @@ export function listIssues(
       ? { rank: (last.backlog_rank as string | null) ?? null, uid: String(last.uid) }
       : null,
   };
+}
+
+/**
+ * Restricts the result set to what matches the query.
+ *
+ * Trigram is the tokenizer (S2-D2) because Korean attaches particles to the
+ * word, so whitespace tokenizing finds fewer than half the real matches. Its
+ * one limitation is that a term shorter than three characters matches *nothing*
+ * — silently, with no error — so a two-letter search would look like an empty
+ * board. Those fall back to LIKE, which is a scan the 5,000-row budget affords.
+ */
+function searchClause(query: string, params: unknown[]): string {
+  const terms = query.trim().split(/\s+/).filter((term) => term !== "");
+  const short = terms.some((term) => [...term].length < MIN_TRIGRAM_TERM);
+
+  if (!short) {
+    // Each term quoted so punctuation in a key like LJ-13 is not read as FTS
+    // syntax; space-separated means all of them must appear.
+    params.push(terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(" "));
+    return "i.uid IN (SELECT uid FROM issues_fts WHERE issues_fts MATCH ?)";
+  }
+
+  const clauses: string[] = [];
+  for (const term of terms) {
+    const like = `%${term.replace(/[%_\\]/g, "\\$&")}%`;
+    clauses.push(
+      `(i.title LIKE ? ESCAPE '\\' OR i.resource_json LIKE ? ESCAPE '\\'
+        OR EXISTS (SELECT 1 FROM issue_former_keys f WHERE f.uid = i.uid AND f.key LIKE ? ESCAPE '\\'))`,
+    );
+    params.push(like, like, like);
+  }
+  return `(${clauses.join(" AND ")})`;
 }
 
 function labelsOf(board: BoardHandle, issuePath: string): string[] {
