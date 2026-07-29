@@ -18,7 +18,7 @@ const STATUS_LABELS = {
   CANCELLED: "취소",
 };
 
-const state = { issues: [], user: null, source: null, detail: null };
+const state = { issues: [], user: null, source: null, detail: null, integrityOpen: false };
 const $ = (selector) => document.querySelector(selector);
 
 document.addEventListener("DOMContentLoaded", boot);
@@ -26,6 +26,7 @@ $("#login-form").addEventListener("submit", login);
 $("#logout-button").addEventListener("click", logout);
 $("#project-filter").addEventListener("change", renderBoard);
 $("#detail-close").addEventListener("click", closeDetail);
+$("#integrity-banner").addEventListener("click", toggleIntegrity);
 $("#timeline-more").addEventListener("click", () => void loadActivity(true));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.detail) closeDetail();
@@ -36,6 +37,7 @@ async function boot() {
     const payload = await api("/me");
     showBoard(payload.user);
     await refreshIssues();
+    await refreshIntegrity();
     connectEvents();
   } catch (error) {
     if (error.status === 401) {
@@ -61,6 +63,7 @@ async function login(event) {
     });
     showBoard(payload.user);
     await refreshIssues();
+    await refreshIntegrity();
     connectEvents();
   } catch (error) {
     errorElement.textContent = error.message || "로그인하지 못했습니다.";
@@ -293,6 +296,128 @@ function formatAt(at) {
   return Number.isNaN(parsed.getTime()) ? at : parsed.toLocaleString();
 }
 
+/**
+ * What a person can do about each kind of quarantine.
+ *
+ * Written here rather than taken from the server's message because the two say
+ * different things on purpose: the server states what is wrong, this states
+ * what to do. A person looking at a broken board needs the second one first.
+ */
+const RECOVERY = {
+  conflict_marker: "충돌 표시(<<<<<<<, =======, >>>>>>>)를 지우고 한쪽 내용으로 정리한 뒤 저장하세요.",
+  duplicate_uid: "같은 uid를 가진 파일 중 하나를 원본으로 두고, 나머지는 uid를 새로 발급하세요.",
+  dangling_ref: "가리키는 대상이 없습니다. 참조를 지우거나 존재하는 이슈로 바꾸세요.",
+  cycle: "부모 관계가 순환합니다. 고리 중 한 곳의 parent를 지우면 풀립니다.",
+  yaml_error: "frontmatter YAML 문법이 깨졌습니다. 들여쓰기와 따옴표를 확인하세요.",
+  yaml_unsupported: "이 도구가 지원하지 않는 YAML 문법입니다(앵커·별칭·태그 등). 값으로 풀어 쓰세요.",
+  frontmatter_missing: "파일 맨 앞의 `---` 블록이 없습니다.",
+  reserved_field: "예약된 필드 이름을 썼습니다. 다른 이름으로 바꾸세요.",
+  encoding: "UTF-8로 읽을 수 없는 바이트가 있습니다.",
+};
+
+const REASON_LABELS = {
+  conflict_marker: "머지 충돌 표시",
+  duplicate_uid: "uid 중복",
+  dangling_ref: "없는 참조",
+  cycle: "계층 순환",
+  yaml_error: "YAML 오류",
+  yaml_unsupported: "미지원 YAML",
+  frontmatter_missing: "frontmatter 없음",
+  reserved_field: "예약어 사용",
+  encoding: "인코딩 오류",
+};
+
+async function refreshIntegrity() {
+  let payload;
+  try {
+    payload = await api("/integrity/issues");
+  } catch (error) {
+    if (error.status === 401) return void showLogin();
+    return;
+  }
+
+  const items = payload.quarantined || [];
+  const conflicts = payload.sprintConflicts || [];
+  const banner = $("#integrity-banner");
+
+  // Nothing wrong means nothing shown. A banner that is always there is a
+  // banner nobody reads.
+  if (items.length === 0 && conflicts.length === 0) {
+    banner.hidden = true;
+    $("#integrity-panel").hidden = true;
+    state.integrityOpen = false;
+    banner.setAttribute("aria-expanded", "false");
+    return;
+  }
+
+  const byReason = groupBy(items, (item) => item.reason);
+  const summary = [...byReason.entries()]
+    .map(([reason, group]) => `${REASON_LABELS[reason] || reason} ${group.length}건`)
+    .join(" · ");
+
+  banner.hidden = false;
+  $("#integrity-summary").textContent = conflicts.length
+    ? `격리 ${items.length}건 (${summary}) · 스프린트 충돌 ${conflicts.join(", ")} — 시작·종료 명령이 차단됩니다`
+    : `격리 ${items.length}건 — ${summary}`;
+
+  renderIntegrityGroups(byReason, conflicts);
+}
+
+function renderIntegrityGroups(byReason, conflicts) {
+  const container = $("#integrity-groups");
+  container.replaceChildren();
+
+  if (conflicts.length) {
+    const group = element("section", "integrity-group");
+    group.append(element("h3", "", "스프린트 충돌"));
+    const item = element("div", "integrity-item");
+    item.append(element("div", "integrity-path", conflicts.join(", ")));
+    item.append(
+      element(
+        "p",
+        "integrity-fix",
+        "ACTIVE 스프린트가 둘 이상입니다. 한쪽 파일의 status를 고쳐 하나만 남기면 시작·종료 명령이 다시 허용됩니다.",
+      ),
+    );
+    group.append(item);
+    container.append(group);
+  }
+
+  // Grouped by kind, because twenty entries of one type is one problem to fix
+  // twenty times, and reading them as a flat list hides that.
+  for (const [reason, items] of byReason) {
+    const group = element("section", "integrity-group");
+    group.append(element("h3", "", `${REASON_LABELS[reason] || reason} — ${items.length}건`));
+
+    for (const item of items) {
+      const row = element("div", "integrity-item");
+      row.append(element("div", "integrity-path", item.path));
+      if (item.detail) row.append(element("p", "integrity-detail", item.detail));
+      const fix = RECOVERY[reason];
+      if (fix) row.append(element("p", "integrity-fix", fix));
+      row.append(element("p", "integrity-when", `발견: ${formatAt(item.detectedAt)}`));
+      group.append(row);
+    }
+    container.append(group);
+  }
+}
+
+function toggleIntegrity() {
+  state.integrityOpen = !state.integrityOpen;
+  $("#integrity-panel").hidden = !state.integrityOpen;
+  $("#integrity-banner").setAttribute("aria-expanded", String(state.integrityOpen));
+}
+
+function groupBy(items, pick) {
+  const groups = new Map();
+  for (const item of items) {
+    const key = pick(item);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return groups;
+}
+
 function connectEvents() {
   state.source?.close();
   setLiveStatus("connecting", "연결 중");
@@ -303,6 +428,9 @@ function connectEvents() {
   for (const event of ["issue.changed", "index.state", "integrity.changed", "resync"]) {
     source.addEventListener(event, () => {
       void refreshIssues();
+      // The banner has to clear itself when somebody repairs a file, without
+      // them going looking for a reload button (AC).
+      void refreshIntegrity();
       // An external edit has to reach an open timeline without a reload (AC3).
       if (state.detail) {
         state.detail.cursor = null;

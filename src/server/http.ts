@@ -111,6 +111,25 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   // Reconciliation is serialised: two overlapping scans would race on the same
   // index rows, and the watcher can easily fire again while one is running.
   let reconciling: Promise<void> = Promise.resolve();
+
+  // What the last announcement said, so the stream carries a change rather than
+  // a heartbeat. Read from the index after every pass instead of threaded out
+  // of the reconcile: both the incremental and the full path can release or
+  // create a quarantine, and only one of them returns a report.
+  let announcedIntegrity = "";
+  const announceIntegrity = (): void => {
+    const health = boardHealth(board.db);
+    const count = quarantineList(board.db).length;
+    const summary = `${count}|${health.sprintConflicts.join(",")}`;
+    if (summary === announcedIntegrity) {
+      return;
+    }
+    announcedIntegrity = summary;
+    stream.publish({
+      type: "integrity.changed",
+      data: { quarantined: count, sprintConflicts: health.sprintConflicts },
+    });
+  };
   const reconcile = (escalation: ReconcileReason | null = null): Promise<void> => {
     reconciling = reconciling.then(async () => {
       const result =
@@ -146,6 +165,8 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
           });
         }
       }
+
+      announceIntegrity();
     }, () => undefined);
     return reconciling;
   };

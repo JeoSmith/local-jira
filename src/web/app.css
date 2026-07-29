@@ -148,3 +148,31 @@ form button:disabled { opacity: .55; cursor: wait; }
   .kind-system   { color: #c6d4de; background: #2a3540; }
   .timeline-more { background: #222a25; border-color: #2c342e; color: #9fb0a5; }
 }
+
+/* ── integrity banner and quarantine list (r11b) ───────────────────────── */
+.integrity-banner { display: flex; align-items: center; gap: 10px; width: calc(100% - 6vw); margin: 0 3vw 12px;
+  padding: 11px 14px; border: 1px solid #d9a441; border-radius: 11px; background: #fdf3dd;
+  color: #6b4a10; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.integrity-banner:hover { background: #fbecc9; }
+.integrity-icon { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 99px;
+  background: #d9a441; color: #fff; font-size: 12px; font-weight: 700; }
+.integrity-more { margin-left: auto; text-decoration: underline; }
+.integrity-panel { margin: 0 3vw 16px; padding: 4px 0 0; }
+.integrity-group { margin-bottom: 14px; border: 1px solid var(--line); border-radius: 11px; background: #fff; overflow: hidden; }
+.integrity-group > h3 { margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line);
+  background: #f5f7f5; font-size: 12px; }
+.integrity-item { padding: 11px 14px; border-top: 1px solid var(--line); font-size: 12px; }
+.integrity-item:first-of-type { border-top: 0; }
+.integrity-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+.integrity-detail { margin: 5px 0 0; color: var(--muted); }
+.integrity-fix { margin: 6px 0 0; padding: 7px 9px; border-radius: 7px; background: #eef1ef; color: #2c4436; }
+.integrity-when { margin: 5px 0 0; color: var(--muted); font-size: 11px; }
+
+@media (prefers-color-scheme: dark) {
+  .integrity-banner { border-color: #7a5a1c; background: #33290f; color: #f0d3a8; }
+  .integrity-banner:hover { background: #3d3113; }
+  .integrity-group { border-color: #2c342e; background: #1a1f1c; }
+  .integrity-group > h3 { border-bottom-color: #2c342e; background: #222a25; }
+  .integrity-item { border-top-color: #2c342e; }
+  .integrity-fix { background: #222a25; color: #bfe6cf; }
+}
