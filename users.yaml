@@ -1,2 +1,5 @@
 schema_version: 1
-users: []
+users:
+  - id: admin
+    display_name: 관리자
+    role: admin
