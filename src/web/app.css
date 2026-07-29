@@ -230,3 +230,34 @@ form button:disabled { opacity: .55; cursor: wait; }
   .column.drop-ok { background: #23342a; }
   .column.drop-no { background: #3a2626; }
 }
+
+/* ── git status badge (r25) ────────────────────────────────────────────── */
+.git-badge { display: inline-flex; align-items: center; gap: 7px; padding: 6px 11px;
+  border: 1px solid var(--line); border-radius: 8px; background: transparent;
+  color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.git-badge:hover { background: rgba(0,0,0,.04); }
+.git-badge .count { font-weight: 700; }
+.git-badge.clean { color: var(--muted); }
+/* Left alone until it starts to mean something: D5 says data is backed up when
+   it is committed *and* pushed, so a growing pile is the thing to notice. */
+.git-badge.warn { border-color: #d9a441; background: #fdf3dd; color: #6b4a10; }
+.git-badge.stale { border-color: #b45454; background: #f8e8e8; color: #7d2b2b; }
+.git-badge.unavailable { border-style: dashed; color: var(--muted); }
+.git-file { display: flex; gap: 9px; align-items: baseline; padding: 7px 14px;
+  border-top: 1px solid var(--line); font-size: 12px; }
+.git-file:first-child { border-top: 0; }
+.git-kind { min-width: 34px; font-size: 10px; font-weight: 700; }
+.git-kind.added { color: #2f6b46; }
+.git-kind.modified { color: #7a5a12; }
+.git-kind.deleted { color: #8a3535; }
+.git-kind.renamed { color: #3f5a7d; }
+.git-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
+.git-key { margin-left: auto; color: var(--muted); }
+.git-note { padding: 10px 14px; color: var(--muted); font-size: 12px; }
+
+@media (prefers-color-scheme: dark) {
+  .git-badge:hover { background: rgba(255,255,255,.06); }
+  .git-badge.warn { border-color: #7a5a1c; background: #33290f; color: #f0d3a8; }
+  .git-badge.stale { border-color: #7d3434; background: #3a2020; color: #f0bcbc; }
+  .git-file { border-top-color: #2c342e; }
+}

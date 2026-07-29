@@ -67,6 +67,7 @@ import {
 } from "../storage/board.ts";
 import { reconcileExternal, reconcileFull } from "../storage/external.ts";
 import { boardHealth, quarantineList } from "../storage/integrity.ts";
+import { gitStatus } from "../storage/git-status.ts";
 import { findTombstone, type ReconcileReason } from "../storage/reconcile.ts";
 import { watchBoard, type BoardWatcher } from "../storage/watcher.ts";
 import { formatEtag } from "../storage/resource.ts";
@@ -529,6 +530,14 @@ async function handle(
     }
   }
 
+  if (route === "GET /git/status") {
+    return guard(response, authed, "issue:read", () => {
+      // Read-only, and local-only: N4 says the tool works offline, so nothing
+      // here fetches. D4 says the service never commits or pushes, so there is
+      // no companion endpoint that would.
+      respondJson(response, 200, gitStatus(authed.board.boardRoot));
+    });
+  }
   if (route === "GET /index") {
     return guard(response, authed, "issue:read", () => {
       respondJson(response, 200, indexReport(authed));

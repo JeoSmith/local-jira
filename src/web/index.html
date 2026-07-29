@@ -37,6 +37,7 @@
             <span>Local Jira</span>
           </div>
           <div class="topbar-actions">
+          <button id="git-badge" type="button" class="git-badge" hidden aria-expanded="false"></button>
           <button id="settings-toggle" type="button" class="ghost-button">설정</button>
             <span id="live-status" class="live-status"><i></i> 연결 중</span>
             <span class="divider" aria-hidden="true"></span>
@@ -68,6 +69,13 @@
           <span id="integrity-summary"></span>
           <span class="integrity-more">자세히</span>
         </button>
+
+        <section id="git-panel" class="integrity-panel" hidden aria-label="미커밋 변경">
+          <div class="integrity-group">
+            <h3 id="git-panel-title"></h3>
+            <div id="git-list"></div>
+          </div>
+        </section>
 
         <section id="integrity-panel" class="integrity-panel" hidden aria-label="격리 항목">
           <div id="integrity-groups"></div>

@@ -19,7 +19,7 @@ const STATUS_LABELS = {
 };
 
 const state = { issues: [], user: null, source: null, detail: null, integrityOpen: false,
-  view: "board", board: null, dragging: null };
+  view: "board", board: null, dragging: null, git: null };
 const $ = (selector) => document.querySelector(selector);
 
 document.addEventListener("DOMContentLoaded", boot);
@@ -29,6 +29,7 @@ $("#project-filter").addEventListener("change", renderBoard);
 $("#detail-close").addEventListener("click", closeDetail);
 $("#integrity-banner").addEventListener("click", toggleIntegrity);
 $("#settings-toggle").addEventListener("click", toggleSettings);
+$("#git-badge").addEventListener("click", toggleGitPanel);
 $("#view-board").addEventListener("click", () => void switchView("board"));
 $("#view-backlog").addEventListener("click", () => void switchView("backlog"));
 $("#index-verify").addEventListener("click", () => void runIndexOp("verify"));
@@ -44,6 +45,7 @@ async function boot() {
     showBoard(payload.user);
     await refreshIssues();
     await refreshIntegrity();
+    await refreshGit();
     connectEvents();
   } catch (error) {
     if (error.status === 401) {
@@ -70,6 +72,7 @@ async function login(event) {
     showBoard(payload.user);
     await refreshIssues();
     await refreshIntegrity();
+    await refreshGit();
     connectEvents();
   } catch (error) {
     errorElement.textContent = error.message || "로그인하지 못했습니다.";
@@ -702,6 +705,101 @@ const REASON_LABELS = {
   encoding: "인코딩 오류",
 };
 
+const GIT_KIND_LABELS = { added: "추가", modified: "수정", deleted: "삭제", renamed: "이름변경" };
+
+/**
+ * The board worktree's git state.
+ *
+ * Read and shown, never acted on: D4 says the service does not commit or push,
+ * so there is deliberately no button here that would. A person does that in a
+ * terminal, and the badge exists so they remember to.
+ */
+async function refreshGit() {
+  let status;
+  try {
+    status = await api("/git/status");
+  } catch {
+    return;
+  }
+  state.git = status;
+
+  const badge = $("#git-badge");
+  badge.hidden = false;
+  badge.className = "git-badge";
+  // Cleared, not appended to: this runs on every reconcile, and without it the
+  // badge accumulates every reading it has ever taken.
+  badge.replaceChildren();
+
+  if (!status.available) {
+    // A git failure must not look like a board failure. The issues are files
+    // and they are fine; only the reporting is out.
+    badge.classList.add("unavailable");
+    badge.textContent = "git 상태 확인 불가";
+    badge.title = [status.reason, status.recovery].filter(Boolean).join("\n");
+    return;
+  }
+
+  const count = status.pending.length;
+  const ahead = status.ahead ?? 0;
+  badge.append(element("span", "count", String(count)));
+  badge.append(document.createTextNode(" 미커밋"));
+
+  // Committed is not backed up (D5). Someone who commits and sees zero would
+  // otherwise believe their work is safe on a machine that is the only copy.
+  if (ahead > 0) {
+    badge.append(document.createTextNode(` · ${ahead} 미푸시`));
+  }
+  badge.append(element("span", "git-key", status.remote === null ? "원격 없음" : lastPushLabel(status)));
+
+  if (count === 0 && ahead === 0) badge.classList.add("clean");
+  else if (count >= 20 || ahead >= 10) badge.classList.add("stale");
+  else if (count > 0 || ahead > 0) badge.classList.add("warn");
+}
+
+function lastPushLabel(status) {
+  if (!status.lastPushAt) return "푸시 기록 없음";
+  const at = new Date(status.lastPushAt);
+  if (Number.isNaN(at.getTime())) return "푸시 기록 없음";
+  const days = Math.floor((Date.now() - at.getTime()) / 86_400_000);
+  if (days >= 1) return `${days}일 전 푸시`;
+  return `${at.toLocaleTimeString()} 푸시`;
+}
+
+function toggleGitPanel() {
+  const panel = $("#git-panel");
+  const opening = panel.hidden;
+  panel.hidden = !opening;
+  $("#git-badge").setAttribute("aria-expanded", String(opening));
+  if (!opening) return;
+
+  const status = state.git;
+  const list = $("#git-list");
+  list.replaceChildren();
+  $("#git-panel-title").textContent = status?.available
+    ? `미커밋 변경 ${status.pending.length}건${status.ahead ? ` · 미푸시 커밋 ${status.ahead}건` : ""}`
+    : "git 상태 확인 불가";
+
+  if (!status?.available) {
+    list.append(element("p", "git-note", [status?.reason, status?.recovery].filter(Boolean).join(" ")));
+    return;
+  }
+  if (status.pending.length === 0) {
+    list.append(element("p", "git-note", "커밋할 변경이 없습니다."));
+  }
+
+  for (const file of status.pending) {
+    const row = element("div", "git-file");
+    row.append(element("span", `git-kind ${file.kind}`, GIT_KIND_LABELS[file.kind] || file.kind));
+    row.append(element("span", "git-path", file.path));
+    // The display key, so a path reads as an issue rather than a filename.
+    if (file.key) row.append(element("span", "git-key", file.key));
+    list.append(row);
+  }
+  list.append(
+    element("p", "git-note", "커밋과 푸시는 터미널에서 직접 하세요. 이 도구는 파일만 씁니다."),
+  );
+}
+
 async function refreshIntegrity() {
   let payload;
   try {
@@ -915,6 +1013,9 @@ function connectEvents() {
       // The banner has to clear itself when somebody repairs a file, without
       // them going looking for a reload button (AC).
       void refreshIntegrity();
+      // The same triggers r08c already watches for — HEAD and index move on a
+      // commit — so the badge follows without a poll of its own.
+      void refreshGit();
       // An external edit has to reach an open timeline without a reload (AC3).
       if (state.detail) {
         state.detail.cursor = null;
