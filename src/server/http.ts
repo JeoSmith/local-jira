@@ -32,7 +32,7 @@ import {
   type UserRecord,
 } from "../domain/users.ts";
 import { buildEvent, redact } from "../domain/events.ts";
-import { STATUSES } from "../domain/transition.ts";
+import { allowedTargets, isStatus, requiresAdmin, STATUSES } from "../domain/transition.ts";
 import { activityOf, lastActorKinds } from "../domain/activity.ts";
 import { childrenOf } from "../domain/hierarchy.ts";
 import { claimability, relatedTo } from "../domain/links.ts";
@@ -1202,6 +1202,11 @@ function respondBoard(
 
   const issues = page.issues.map(({ createdByKind, ...issue }) => {
     const claim = claimability(context.board, issue.uid);
+    const blockedFrom =
+      ((context.board.db
+        .prepare("SELECT blocked_from FROM issues WHERE uid = ?")
+        .get(issue.uid) as { blocked_from: string | null } | undefined)?.blocked_from) ?? null;
+    const from = issue.status !== null && isStatus(issue.status) ? issue.status : null;
     return {
       ...issue,
       created_by_kind: createdByKind,
@@ -1210,10 +1215,16 @@ function respondBoard(
       // rather than just a mark (§5.2).
       claimable: claim.claimable,
       blocked_by: claim.blockedBy,
-      blocked_from:
-        ((context.board.db
-          .prepare("SELECT blocked_from FROM issues WHERE uid = ?")
-          .get(issue.uid) as { blocked_from: string | null } | undefined)?.blocked_from) ?? null,
+      blocked_from: blockedFrom,
+      // Computed here from §5.2 rather than left for the screen to work out.
+      // A second copy of the transition table in the client is a copy that
+      // drifts, and the first sign would be a drag the board allowed and the
+      // server refused.
+      allowed_to: from === null
+        ? []
+        : allowedTargets(from, blockedFrom).filter(
+            (to) => !requiresAdmin(from, to) || context.user?.role === "admin",
+          ),
     };
   });
 
