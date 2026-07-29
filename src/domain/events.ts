@@ -29,6 +29,8 @@ export const VERBS = [
   "sprint.deleted",
   "user.created",
   "user.role_changed",
+  "token.issued",
+  "token.revoked",
   "access.denied",
 ] as const;
 export type Verb = (typeof VERBS)[number];
@@ -99,6 +101,16 @@ export function buildEvent(localDirectory: string, input: EventInput): BuiltEven
 }
 
 /**
+ * Names that survive the filter below because they are identifiers, not secrets.
+ *
+ * A list of exact keys rather than a looser pattern: `token_id` names a token
+ * without revealing anything usable, and r13a AC9 requires an audit record to
+ * identify the token that way. Widening the rule to "anything ending in _id"
+ * would let a future `credential_id` through without anyone deciding to.
+ */
+const ALLOWED = new Set(["token_id"]);
+
+/**
  * Removes anything that must never reach an audit record (N6).
  *
  * Applied at the boundary rather than trusted to each caller: an event is
@@ -106,21 +118,38 @@ export function buildEvent(localDirectory: string, input: EventInput): BuiltEven
  * a leak to everyone with the repository.
  */
 export function redact(value: Record<string, unknown>): JsonValue {
-  const SECRET = /password|hash|token|salt|secret|credential/i;
   const out: Record<string, JsonValue> = {};
 
   for (const [key, entry] of Object.entries(value)) {
-    if (SECRET.test(key)) {
+    if (SECRET.test(key) && !ALLOWED.has(key)) {
       continue;
     }
-    out[key] =
-      entry === null || entry === undefined
-        ? null
-        : typeof entry === "object"
-          ? (redact(entry as Record<string, unknown>) as JsonValue)
-          : (entry as JsonValue);
+    out[key] = scrub(entry);
   }
   return out;
+}
+
+const SECRET = /password|hash|token|salt|secret|credential/i;
+
+/**
+ * One value, whatever shape it is.
+ *
+ * Arrays are their own case because `typeof [] === "object"`: recursing into
+ * one through `Object.entries` turns `["a","b"]` into `{"0":"a","1":"b"}`, and
+ * an audit record that changes the shape of what it recorded is not a record
+ * of it. Elements are still scrubbed — a list of objects can hold a secret.
+ */
+function scrub(entry: unknown): JsonValue {
+  if (entry === null || entry === undefined) {
+    return null;
+  }
+  if (Array.isArray(entry)) {
+    return entry.map(scrub) as JsonValue;
+  }
+  if (typeof entry === "object") {
+    return redact(entry as Record<string, unknown>);
+  }
+  return entry as JsonValue;
 }
 
 /**

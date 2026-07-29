@@ -7,7 +7,7 @@ import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { can, capabilitiesOf } from "../../src/auth/authorize.ts";
+import { can, canManageTokensFor, capabilitiesOf } from "../../src/auth/authorize.ts";
 import {
   bootstrapAdmin,
   changeRole,
@@ -112,8 +112,17 @@ test("roles differ on operating the board, not on using it", () => {
 
   // Only an admin manages who the users are.
   assert.equal(can("member", "user:manage"), false);
-  assert.equal(can("member", "token:manage"), false);
   assert.equal(can("admin", "user:manage"), true);
+
+  // Tokens are the exception, and the capability alone cannot express it: a
+  // member holds `token:manage` but only over their own account (S3-D8).
+  // Admin-only issuance pushes a team into sharing the admin login; issuance
+  // for anybody lets a member leave audit records under another name.
+  assert.equal(can("member", "token:manage"), true);
+  assert.equal(canManageTokensFor({ id: "dev", role: "member" }, "dev"), true);
+  assert.equal(canManageTokensFor({ id: "dev", role: "member" }, "other"), false);
+  assert.equal(canManageTokensFor({ id: "root", role: "admin" }, "other"), true);
+  assert.equal(canManageTokensFor({ id: "bot", role: "agent" }, "bot"), false);
 
   // An agent's session grants reading only; its writes are authorised by token
   // scope instead (D9), and a second weaker gate here would override that.

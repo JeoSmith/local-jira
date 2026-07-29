@@ -102,7 +102,23 @@
         <p id="index-progress" class="integrity-detail" hidden></p>
         <p id="index-result" class="integrity-fix" hidden></p>
 
-        <h2 class="detail-section" style="margin-top:22px">재키잉 이력</h2>
+        <h2 class="detail-section settings-section">액세스 토큰 (PAT)</h2>
+        <form id="token-form" class="token-form">
+          <input id="token-name" type="text" placeholder="이름 (예: 로컬 에이전트)" maxlength="60" />
+          <label for="token-expiry" class="token-field-label">만료</label>
+          <select id="token-expiry">
+            <option value="90" selected>90일 (기본)</option>
+            <option value="30">30일</option>
+            <option value="365">365일</option>
+            <option value="">무기한</option>
+          </select>
+          <button type="submit">발급</button>
+        </form>
+        <p id="token-secret" class="token-secret" hidden></p>
+        <p id="token-empty" class="column-empty" hidden>발급된 토큰이 없습니다.</p>
+        <ol id="token-list" class="timeline"></ol>
+
+        <h2 class="detail-section settings-section">재키잉 이력</h2>
         <p id="rekey-empty" class="column-empty" hidden>재키잉된 이슈가 없습니다.</p>
         <ol id="rekey-list" class="timeline"></ol>
       </section>
