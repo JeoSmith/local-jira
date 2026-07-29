@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -424,4 +425,65 @@ test("two broken files among five thousand leave the other 4,998 working", { tim
   });
   assert.equal(moved.status, 200, "a state transition still works");
   assert.equal((await make(session, "여전히 만들 수 있다")).key.startsWith("LJ-"), true);
+});
+
+test("the stream announces a quarantine appearing and clearing", { timeout: 60_000 }, async (t) => {
+  const session = await makeSession(t);
+  const broken = await make(session, "고장날 이슈");
+  const good = fs.readFileSync(issueFile(session, broken.key), "utf8");
+
+  // Raw http rather than fetch: an abandoned fetch stream hangs rather than
+  // failing, which turns a broken assertion into a forty-second timeout.
+  const seen: Array<{ event: string; data: string }> = [];
+  const request = http.request(
+    `${session.server.url}/stream`,
+    { headers: { cookie: session.cookie, accept: "text/event-stream" } },
+    (response) => {
+      let buffer = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => {
+        buffer += chunk;
+        for (const frame of buffer.split("\n\n")) {
+          const event = /^event: (.+)$/m.exec(frame)?.[1];
+          const data = /^data: (.+)$/m.exec(frame)?.[1];
+          if (event && data && !seen.some((entry) => entry.data === data)) {
+            seen.push({ event, data });
+          }
+        }
+      });
+    },
+  );
+  request.end();
+  t.after(() => request.destroy());
+
+  const waitFor = async (predicate: () => boolean): Promise<void> => {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && !predicate()) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  await waitFor(() => seen.length >= 0 && request.socket !== undefined);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  fs.writeFileSync(issueFile(session, broken.key), "---\nuid: [unclosed\n---\n");
+  await session.server.reconcile();
+  await waitFor(() =>
+    seen.some((entry) => entry.event === "integrity.changed" && entry.data.includes('"quarantined":1')),
+  );
+  assert.ok(
+    seen.some((entry) => entry.event === "integrity.changed" && entry.data.includes('"quarantined":1')),
+    `expected a quarantine announcement, saw ${JSON.stringify(seen)}`,
+  );
+
+  // …and again when it is repaired, so a banner can clear itself rather than
+  // waiting for somebody to reload.
+  fs.writeFileSync(issueFile(session, broken.key), good);
+  await session.server.reconcile();
+  await waitFor(() =>
+    seen.some((entry) => entry.event === "integrity.changed" && entry.data.includes('"quarantined":0')),
+  );
+  assert.ok(
+    seen.some((entry) => entry.event === "integrity.changed" && entry.data.includes('"quarantined":0')),
+    "the clearing was never announced",
+  );
 });
