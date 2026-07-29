@@ -395,9 +395,7 @@ export function loadScannedFile(
     stats.failed += 1;
     uid = previous?.uid ?? null;
 
-    if (file.identity.kind === "issue") {
-      quarantineExisting(db, file.identity.path, previous?.uid ?? null);
-    }
+    quarantineExisting(db, file.identity, previous?.uid ?? null);
     db.prepare(
       `INSERT INTO index_errors(path, uid, project, stage, reason, detail, last_good_hash, detected_at)
        VALUES(?,?,?,'A',?,?,?,?)
@@ -443,10 +441,22 @@ export function loadScannedFile(
  * name the last good content hash. Search is cleared, because a quarantined
  * issue must not surface in results.
  */
-function quarantineExisting(db: DatabaseSync, path: string, uid: string | null): void {
-  db.prepare("UPDATE issues SET state = 'INVALID' WHERE path = ?").run(path);
-  if (uid !== null) {
-    db.prepare("DELETE FROM issues_fts WHERE uid = ?").run(uid);
+function quarantineExisting(
+  db: DatabaseSync,
+  identity: FileIdentity,
+  uid: string | null,
+): void {
+  if (identity.kind === "issue") {
+    db.prepare("UPDATE issues SET state = 'INVALID' WHERE path = ?").run(identity.path);
+    if (uid !== null) {
+      db.prepare("DELETE FROM issues_fts WHERE uid = ?").run(uid);
+    }
+    return;
+  }
+  // Sprints carry a state for the same reason issues do: one unreadable sprint
+  // file must drop out of the lists without taking the others with it (§5.6).
+  if (identity.kind === "sprint") {
+    db.prepare("UPDATE sprints SET state = 'INVALID' WHERE path = ?").run(identity.path);
   }
 }
 

@@ -37,6 +37,14 @@ import { activityOf, lastActorKinds } from "../domain/activity.ts";
 import { childrenOf } from "../domain/hierarchy.ts";
 import { claimability, relatedTo } from "../domain/links.ts";
 import {
+  createSprint,
+  deleteSprint,
+  findSprint,
+  listSprints,
+  SprintNotEmptyError,
+  updateSprint,
+} from "../domain/sprint.ts";
+import {
   isRankField,
   moveIssue,
   NeighboursMovedError,
@@ -441,6 +449,46 @@ async function handle(
       });
     });
   }
+  // ── sprints (r05a) ────────────────────────────────────────────────────
+  const sprintCollection = /^\/projects\/([^/]+)\/sprints$/.exec(url.pathname);
+  if (sprintCollection && request.method === "GET") {
+    return guard(response, authed, "issue:read", () => {
+      const status = url.searchParams.get("status");
+      respondJson(response, 200, {
+        sprints: listSprints(authed.board, decodeURIComponent(sprintCollection[1]), status ?? undefined),
+      });
+    });
+  }
+  if (sprintCollection && request.method === "POST") {
+    return guard(response, authed, "sprint:write", () =>
+      createSprintRoute(decodeURIComponent(sprintCollection[1]), request, response, authed),
+    );
+  }
+
+  const sprintItem = /^\/sprints\/([^/]+)$/.exec(url.pathname);
+  if (sprintItem) {
+    const id = decodeURIComponent(sprintItem[1]);
+    if (request.method === "GET") {
+      return guard(response, authed, "issue:read", () => {
+        const sprint = findSprint(authed.board, id);
+        if (sprint === null) {
+          return respondError(response, 404, "E_SPRINT_NOT_FOUND", `No sprint with id ${id}`);
+        }
+        respondResource(response, 200, sprint.resource as JsonValue, sprint.etag);
+      });
+    }
+    if (request.method === "PATCH") {
+      return guard(response, authed, "sprint:write", () =>
+        updateSprintRoute(id, request, response, authed),
+      );
+    }
+    if (request.method === "DELETE") {
+      return guard(response, authed, "sprint:write", () =>
+        deleteSprintRoute(id, request, response, authed),
+      );
+    }
+  }
+
   if (route === "GET /index") {
     return guard(response, authed, "issue:read", () => {
       respondJson(response, 200, indexReport(authed));
@@ -955,6 +1003,13 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
       path: error.path,
     });
   }
+  if (error instanceof SprintNotEmptyError) {
+    return respondJson(response, 409, {
+      error: { code: error.code, message: error.message, detail: null },
+      issues: error.issues,
+      strategies: error.strategies,
+    });
+  }
   if (error instanceof ChildrenPresentError) {
     // The caller has to choose, so the response carries everything the choice
     // needs: which children, and what the options are called.
@@ -969,6 +1024,7 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
       : error.code === "E_LINK_NOT_FOUND" ? 404
       : error.code === "E_KEY_COLLISION" ? 409
       : error.code === "E_STRATEGY_IMPOSSIBLE" ? 409
+      : error.code === "E_SPRINT_NOT_DELETABLE" ? 409
       : 400;
     return respondError(response, status, error.code, error.message, error.detail);
   }
@@ -1051,6 +1107,93 @@ async function rankRoute(
         "The region could not be rebalanced. Reload the list and try again.",
       );
     }
+    return handleWriteError(error, response);
+  }
+}
+
+async function createSprintRoute(
+  project: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  try {
+    const sprint = await createSprint(
+      context.writable,
+      project,
+      {
+        name: typeof body.name === "string" ? body.name : undefined,
+        goal: typeof body.goal === "string" ? body.goal : null,
+        start_at: typeof body.start_at === "string" ? body.start_at : undefined,
+        end_at: typeof body.end_at === "string" ? body.end_at : undefined,
+        capacity: body.capacity === undefined || body.capacity === null
+          ? null
+          : Number(body.capacity),
+        status: typeof body.status === "string" ? body.status : undefined,
+      },
+      actorOf(context),
+    );
+    response.setHeader("Location", `/sprints/${sprint.id}`);
+    respondResource(response, 201, sprint.resource as JsonValue, sprint.etag);
+  } catch (error) {
+    return handleWriteError(error, response);
+  }
+}
+
+async function updateSprintRoute(
+  id: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  try {
+    const result = await updateSprint(
+      context.writable,
+      id,
+      headerValue(request, "if-match"),
+      {
+        name: typeof body.name === "string" ? body.name : undefined,
+        goal: body.goal === undefined ? undefined : (body.goal as string | null),
+        start_at: typeof body.start_at === "string" ? body.start_at : undefined,
+        end_at: typeof body.end_at === "string" ? body.end_at : undefined,
+        capacity: body.capacity === undefined ? undefined : (body.capacity as number | null),
+        status: typeof body.status === "string" ? body.status : undefined,
+      },
+      actorOf(context),
+    );
+    respondResource(response, 200, result.sprint.resource as JsonValue, result.sprint.etag);
+  } catch (error) {
+    return handleWriteError(error, response);
+  }
+}
+
+async function deleteSprintRoute(
+  id: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const requested = new URL(request.url ?? "/", "http://localhost").searchParams.get("strategy");
+  if (requested !== null && requested !== "release") {
+    return respondError(
+      response, 400, "E_INVALID_STRATEGY",
+      `"${requested}" is not a strategy for deleting a sprint.`,
+      "Use strategy=release to send its issues back to the backlog.",
+    );
+  }
+
+  try {
+    await deleteSprint(
+      context.writable,
+      id,
+      headerValue(request, "if-match"),
+      actorOf(context),
+      requested as "release" | null,
+    );
+    response.writeHead(204).end();
+  } catch (error) {
     return handleWriteError(error, response);
   }
 }

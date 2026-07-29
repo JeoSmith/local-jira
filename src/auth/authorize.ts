@@ -15,6 +15,7 @@ export type Capability =
   | "issue:rank"
   | "index:rebuild"
   | "index:verify"
+  | "sprint:write"
   | "claim:release"
   | "user:manage"
   | "token:manage";
@@ -23,7 +24,7 @@ const CAPABILITIES: Record<Role, Capability[]> = {
   admin: [
     "issue:read", "issue:write", "issue:delete", "issue:rank",
     "claim:release", "user:manage", "token:manage",
-    "index:rebuild", "index:verify",
+    "index:rebuild", "index:verify", "sprint:write",
   ],
   // S1-D11: a member may delete anyone's issue. The event names who did it and
   // the file is in git, so the damage is visible and reversible; restricting it
@@ -33,6 +34,10 @@ const CAPABILITIES: Record<Role, Capability[]> = {
   member: [
     "issue:read", "issue:write", "issue:delete", "issue:rank", "claim:release",
     "index:verify",
+    // Its own capability rather than folded into issue:write. Shaping the
+    // sprints is planning, not content, and an agent that may one day edit
+    // issues must not thereby be able to restructure what the team commits to.
+    "sprint:write",
   ],
   // An agent's session role grants nothing beyond reading. Its real permissions
   // come from the token's scopes (D9, enforced in r13b), so leaving write here
