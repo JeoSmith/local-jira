@@ -21,7 +21,22 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const STORY_DIR = path.join(ROOT, "jira-docs/2_requirements/story");
-const SPRINT_DOC = path.join(ROOT, "jira-docs/4_plans/sprints/sprint-01-m1-reliable-core.md");
+const SPRINT_DIR = path.join(ROOT, "jira-docs/4_plans/sprints");
+
+/**
+ * Every sprint document, not one named path.
+ *
+ * A checker that only knows about the sprint it was written for stops checking
+ * the moment a second one appears — and the second one is where the numbers get
+ * typed fresh and go wrong.
+ */
+function sprintDocuments(): string[] {
+  return fs
+    .readdirSync(SPRINT_DIR)
+    .filter((name) => /^sprint-\d+-.*\.md$/.test(name) && !name.endsWith("-decisions.md"))
+    .sort()
+    .map((name) => path.join(SPRINT_DIR, name));
+}
 
 interface Story {
   id: string;
@@ -112,113 +127,132 @@ function frontmatterNumber(doc: string, key: string): number | null {
 // ── the comparisons ─────────────────────────────────────────────────────────
 
 function main(): void {
-  const doc = fs.readFileSync(SPRINT_DOC, "utf8");
   const stories = readStories();
-  const estimates = readEstimates(doc);
-  const waves = readWaves(doc);
+  const documents = sprintDocuments();
 
-  if (waves.length === 0 || estimates.size === 0) {
-    fail("스프린트 문서에서 웨이브 표 또는 추정 표를 읽지 못했습니다. 형식이 바뀌었나요?");
+  if (documents.length === 0) {
+    fail("스프린트 문서를 하나도 찾지 못했습니다.");
     report();
     return;
   }
 
+  let totalWaves = 0;
+  let earnedAll = 0;
+  let scopeAll = 0;
+
+  for (const file of documents) {
+    const label = path.basename(file);
+    const doc = fs.readFileSync(file, "utf8");
+    const estimates = readEstimates(doc);
+    const waves = readWaves(doc);
+
+    if (waves.length === 0 || estimates.size === 0) {
+      fail(`${label}: 웨이브 표 또는 추정 표를 읽지 못했습니다. 형식이 바뀌었나요?`);
+      continue;
+    }
+    totalWaves += waves.length;
+
+    const say = (message: string): void => fail(`${label}: ${message}`);
+    const wavePoints = waves.reduce((sum, wave) => sum + wave.points, 0);
+    const earned = waves.filter((wave) => wave.complete).reduce((sum, w) => sum + w.points, 0);
+    scopeAll += wavePoints;
+    earnedAll += earned;
+
+    checkOne(doc, stories, estimates, waves, say);
+  }
+
+  report(stories, earnedAll, scopeAll, totalWaves);
+}
+
+function checkOne(
+  doc: string,
+  stories: Map<string, Story>,
+  estimates: Map<string, number>,
+  waves: Wave[],
+  say: (message: string) => void,
+): void {
   // 1. the estimate table adds up to the total it prints
   const declaredTotal = Number(/^\|\s*\*\*합계\*\*\s*\|\s*\*\*(\d+)\*\*/m.exec(doc)?.[1] ?? "-1");
   const actualTotal = [...estimates.values()].reduce((sum, value) => sum + value, 0);
   if (declaredTotal !== actualTotal) {
-    fail(`추정 합계가 ${declaredTotal}점이라고 적혀 있지만 행을 더하면 ${actualTotal}점입니다.`);
+    say(`추정 합계가 ${declaredTotal}점이라고 적혀 있지만 행을 더하면 ${actualTotal}점입니다.`);
   }
 
-  // 2. every story named in a wave has an estimate, and exists as a file
+  // 2. every story named in a wave has an estimate and a file
   for (const wave of waves) {
     for (const id of wave.stories) {
       if (!estimates.has(id)) {
-        fail(`Wave ${wave.number}의 ${id}가 추정 표에 없습니다.`);
+        say(`Wave ${wave.number}의 ${id}가 추정 표에 없습니다.`);
       }
       if (!stories.has(id)) {
-        fail(`Wave ${wave.number}의 ${id}에 해당하는 스토리 파일이 없습니다.`);
+        say(`Wave ${wave.number}의 ${id}에 해당하는 스토리 파일이 없습니다.`);
       }
     }
-    // 3. the wave's printed points are the sum of its own stories
     const summed = wave.stories.reduce((sum, id) => sum + (estimates.get(id) ?? 0), 0);
     if (summed !== wave.points) {
-      fail(`Wave ${wave.number}는 ${wave.points}점이라고 적혀 있지만 스토리를 더하면 ${summed}점입니다.`);
+      say(`Wave ${wave.number}는 ${wave.points}점이라고 적혀 있지만 스토리를 더하면 ${summed}점입니다.`);
     }
   }
 
-  // 4. the frontmatter agrees with the wave table
+  // 3. the frontmatter agrees with the wave table
   const scopePoints = frontmatterNumber(doc, "scope_points");
   const scopeCount = frontmatterNumber(doc, "scope_count");
   const carriedOver = frontmatterNumber(doc, "carried_over");
-
   const wavePoints = waves.reduce((sum, wave) => sum + wave.points, 0);
   const waveStories = waves.reduce((sum, wave) => sum + wave.stories.length, 0);
 
   if (scopePoints !== wavePoints) {
-    fail(`frontmatter의 scope_points=${scopePoints}가 웨이브 합계 ${wavePoints}점과 다릅니다.`);
+    say(`frontmatter의 scope_points=${scopePoints}가 웨이브 합계 ${wavePoints}점과 다릅니다.`);
   }
   if (scopeCount !== waveStories) {
-    fail(`frontmatter의 scope_count=${scopeCount}가 웨이브에 담긴 ${waveStories}건과 다릅니다.`);
+    say(`frontmatter의 scope_count=${scopeCount}가 웨이브에 담긴 ${waveStories}건과 다릅니다.`);
   }
   if (carriedOver !== null && scopeCount !== null && estimates.size - scopeCount !== carriedOver) {
-    fail(
+    say(
       `frontmatter의 carried_over=${carriedOver}가 추정 표 ${estimates.size}건 − 범위 ${scopeCount}건 ` +
         `= ${estimates.size - scopeCount}건과 다릅니다.`,
     );
   }
 
-  // 5. the progress line is derived, not asserted
+  // 4. the progress line is derived, not asserted
   const progress = /\*\*(\d+)\s*\/\s*(\d+)점\s*\((\d+)%\)\*\*/.exec(doc);
   if (!progress) {
-    fail("진행 현황의 `**X / Y점 (Z%)**` 줄을 찾지 못했습니다.");
+    say("진행 현황의 `**X / Y점 (Z%)**` 줄을 찾지 못했습니다.");
   } else {
     const [, done, total, percent] = progress.map(Number);
-    const earned = waves.filter((wave) => wave.complete).reduce((sum, wave) => sum + wave.points, 0);
+    const earned = waves.filter((wave) => wave.complete).reduce((sum, w) => sum + w.points, 0);
     if (done !== earned) {
-      fail(`진행이 ${done}점이라고 적혀 있지만 완료 표시된 웨이브의 합은 ${earned}점입니다.`);
+      say(`진행이 ${done}점이라고 적혀 있지만 완료 표시된 웨이브의 합은 ${earned}점입니다.`);
     }
     if (total !== wavePoints) {
-      fail(`진행의 분모 ${total}점이 웨이브 합계 ${wavePoints}점과 다릅니다.`);
+      say(`진행의 분모 ${total}점이 웨이브 합계 ${wavePoints}점과 다릅니다.`);
     }
     const expected = Math.round((earned / wavePoints) * 100);
     if (percent !== expected) {
-      fail(`진행률이 ${percent}%로 적혀 있지만 ${earned}/${wavePoints}는 ${expected}%입니다.`);
+      say(`진행률이 ${percent}%로 적혀 있지만 ${earned}/${wavePoints}는 ${expected}%입니다.`);
     }
   }
 
-  // 6. "완료" in the wave table means the stories say so too
-  //
-  // This is the one that was actually wrong: the document announced Wave 2 as
-  // passed while every story in it was still a draft with 0 of 68 boxes ticked.
+  // 5. "완료" means the stories say so too
   for (const wave of waves) {
     const members = wave.stories
       .map((id) => stories.get(id))
       .filter((story): story is Story => story !== undefined);
 
-    // A wave in progress may hold finished stories — that is what progress
-    // looks like. The two claims worth checking are the absolute ones: a wave
-    // called complete has nothing unfinished in it, and a wave with nothing
-    // unfinished has been called complete.
     if (wave.complete) {
       for (const story of members.filter((entry) => entry.status !== "done")) {
-        fail(`Wave ${wave.number}는 완료로 표시됐는데 ${story.file}의 status가 "${story.status}"입니다.`);
+        say(`Wave ${wave.number}는 완료로 표시됐는데 ${story.file}의 status가 "${story.status}"입니다.`);
       }
     } else if (members.length > 0 && members.every((story) => story.status === "done")) {
-      fail(
+      say(
         `Wave ${wave.number}의 스토리가 모두 done인데 웨이브가 완료로 표시되지 않았습니다. ` +
           "진행 현황 표와 진행 점수를 갱신하세요.",
       );
     }
 
-    for (const id of wave.stories) {
-      const story = stories.get(id);
-      if (!story) {
-        continue;
-      }
-      // A finished story may leave criteria open only by naming where each went.
+    for (const story of members) {
       if (story.status === "done" && story.ticked + story.carried !== story.total) {
-        fail(
+        say(
           `${story.file}: 인수조건 ${story.total}건 중 충족 ${story.ticked} + 이월 ${story.carried}건뿐입니다. ` +
             "남은 항목은 이월 대상을 적거나 체크해야 합니다.",
         );
@@ -226,7 +260,7 @@ function main(): void {
     }
   }
 
-  // 7. the acceptance-criteria tally in the prose matches the boxes
+  // 6. the acceptance-criteria tally in the prose matches the boxes
   const tally = /인수조건 (\d+)건 중 \*\*(\d+)건 충족, (\d+)건 이월\*\*/.exec(doc);
   if (tally) {
     const wave2 = waves.find((wave) => wave.number === "2");
@@ -243,21 +277,24 @@ function main(): void {
 
     counted.forEach((value, index) => {
       if (value !== claimed[index]) {
-        fail(`인수조건 ${labels[index]}이 ${claimed[index]}건으로 적혀 있지만 실제로는 ${value}건입니다.`);
+        say(`인수조건 ${labels[index]}이 ${claimed[index]}건으로 적혀 있지만 실제로는 ${value}건입니다.`);
       }
     });
   }
-
-  report(stories, waves, wavePoints);
 }
 
-function report(stories?: Map<string, Story>, waves?: Wave[], total?: number): void {
-  if (stories && waves && total !== undefined) {
-    const earned = waves.filter((wave) => wave.complete).reduce((sum, wave) => sum + wave.points, 0);
+function report(
+  stories?: Map<string, Story>,
+  earned?: number,
+  total?: number,
+  waves?: number,
+): void {
+  if (stories && earned !== undefined && total !== undefined) {
     const done = [...stories.values()].filter((story) => story.status === "done");
+    const percent = total === 0 ? 0 : Math.round((earned / total) * 100);
     process.stdout.write(
       `스토리 ${stories.size}건 · 완료 ${done.length}건 · ` +
-        `진행 ${earned}/${total}점 (${Math.round((earned / total) * 100)}%)\n`,
+        `웨이브 ${waves ?? 0}개 · 전체 진행 ${earned}/${total}점 (${percent}%)\n`,
     );
   }
 
