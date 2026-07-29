@@ -470,6 +470,13 @@ async function handle(
     );
   }
 
+  const boardRoute = /^\/projects\/([^/]+)\/board$/.exec(url.pathname);
+  if (boardRoute && request.method === "GET") {
+    return guard(response, authed, "issue:read", () =>
+      respondBoard(decodeURIComponent(boardRoute[1]), response, authed),
+    );
+  }
+
   const sprintCommand = /^\/sprints\/([^/]+)\/(start|close)$/.exec(url.pathname);
   if (sprintCommand && request.method === "POST") {
     const id = decodeURIComponent(sprintCommand[1]);
@@ -1158,6 +1165,82 @@ async function rankRoute(
     }
     return handleWriteError(error, response);
   }
+}
+
+/**
+ * The active sprint and what is in it.
+ *
+ * Scoped to one sprint rather than the whole project: a board is what the team
+ * is doing now, and a column holding every issue that ever existed answers a
+ * different question. With no active sprint this is an empty board, not an
+ * error — a project between sprints is an ordinary state (§8).
+ */
+function respondBoard(
+  project: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const active = listSprints(context.board, project, "ACTIVE");
+  const health = boardHealth(context.board.db);
+  const conflicted = health.sprintConflicts.includes(project);
+
+  if (active.length === 0 || conflicted) {
+    return respondJson(response, 200, {
+      sprint: null,
+      issues: [],
+      columns: [],
+      // Told apart on purpose: "no sprint is running" and "the board cannot
+      // tell which sprint is running" need different things from a person.
+      reason: conflicted ? "sprint_conflict" : "no_active_sprint",
+      sprintConflicts: health.sprintConflicts,
+    });
+  }
+
+  const sprint = active[0];
+  const page = listIssues(context.board, { project, sprint: [sprint.id], limit: 500 });
+  const kinds = lastActorKinds(context.board, page.issues.map((issue) => issue.uid));
+
+  const issues = page.issues.map(({ createdByKind, ...issue }) => {
+    const claim = claimability(context.board, issue.uid);
+    return {
+      ...issue,
+      created_by_kind: createdByKind,
+      last_actor_kind: kinds.get(issue.uid) ?? null,
+      // Carried on the card so a blocked issue looks blocked, with the reason
+      // rather than just a mark (§5.2).
+      claimable: claim.claimable,
+      blocked_by: claim.blockedBy,
+      blocked_from:
+        ((context.board.db
+          .prepare("SELECT blocked_from FROM issues WHERE uid = ?")
+          .get(issue.uid) as { blocked_from: string | null } | undefined)?.blocked_from) ?? null,
+    };
+  });
+
+  // Every status is a column, in the order work moves through them. BLOCKED
+  // gets its own rather than a badge on another column: §5.2 makes it a real
+  // status, and a card sitting under a heading it does not have would be a lie
+  // the moment anyone dragged it.
+  const order = ["BACKLOG", "TODO", "IN_PROGRESS", "IN_REVIEW", "BLOCKED", "DONE", "CANCELLED"];
+  const columns = order.map((status) => {
+    const held = issues.filter((issue) => (issue.status ?? "BACKLOG") === status);
+    return {
+      status,
+      count: held.length,
+      points: held.reduce((total, issue) => total + (issue.points ?? 0), 0),
+      // Shown when it holds something, or when work normally passes through it.
+      // A permanently empty CANCELLED column is dead space on every board.
+      always: !["BLOCKED", "CANCELLED"].includes(status),
+    };
+  });
+
+  respondJson(response, 200, {
+    sprint: { id: sprint.id, name: sprint.name, goal: sprint.goal, capacity: sprint.capacity },
+    plan: planOf(context.board, sprint.id),
+    issues,
+    columns,
+    sprintConflicts: health.sprintConflicts,
+  });
 }
 
 async function startSprintRoute(

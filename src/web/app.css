@@ -196,3 +196,19 @@ form button:disabled { opacity: .55; cursor: wait; }
   .settings-view { border-color: #2c342e; background: #1a1f1c; }
   .index-actions button { background: #222a25; border-color: #2c342e; color: #dfe6e1; }
 }
+
+/* ── board scoped to the active sprint (r07a) ──────────────────────────── */
+.view-switch { display: flex; gap: 6px; margin-right: 14px; }
+.view-switch [aria-selected="true"] { background: #e6ece8; border-color: #b9c9be; font-weight: 600; }
+.sprint-line { margin: 0 3vw 10px; color: var(--muted); font-size: 12px; }
+.sprint-line strong { color: inherit; }
+.sprint-over { color: #8a5a12; font-weight: 600; }
+.card-blocked { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 99px;
+  background: #f6dcdc; color: #7d2b2b; font-size: 10px; font-weight: 700; }
+.card-from { color: var(--muted); font-size: 10px; }
+
+@media (prefers-color-scheme: dark) {
+  .view-switch [aria-selected="true"] { background: #26332b; border-color: #3a4a40; }
+  .sprint-over { color: #f0c98a; }
+  .card-blocked { background: #4a2626; color: #f0bcbc; }
+}

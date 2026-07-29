@@ -18,7 +18,8 @@ const STATUS_LABELS = {
   CANCELLED: "취소",
 };
 
-const state = { issues: [], user: null, source: null, detail: null, integrityOpen: false };
+const state = { issues: [], user: null, source: null, detail: null, integrityOpen: false,
+  view: "board", board: null };
 const $ = (selector) => document.querySelector(selector);
 
 document.addEventListener("DOMContentLoaded", boot);
@@ -28,6 +29,8 @@ $("#project-filter").addEventListener("change", renderBoard);
 $("#detail-close").addEventListener("click", closeDetail);
 $("#integrity-banner").addEventListener("click", toggleIntegrity);
 $("#settings-toggle").addEventListener("click", toggleSettings);
+$("#view-board").addEventListener("click", () => void switchView("board"));
+$("#view-backlog").addEventListener("click", () => void switchView("backlog"));
 $("#index-verify").addEventListener("click", () => void runIndexOp("verify"));
 $("#index-rebuild").addEventListener("click", () => void runIndexOp("rebuild"));
 $("#timeline-more").addEventListener("click", () => void loadActivity(true));
@@ -102,6 +105,7 @@ async function refreshIssues() {
     const payload = await api("/issues?limit=5000");
     state.issues = payload.issues;
     updateProjectFilter();
+    if (state.view === "board") await loadBoard();
     renderBoard();
     $("#board-error").hidden = true;
   } catch (error) {
@@ -132,22 +136,107 @@ function renderBoard() {
     : state.issues;
   const board = $("#board");
   board.replaceChildren();
-  $("#board-empty").hidden = issues.length !== 0;
-  board.hidden = issues.length === 0;
 
-  const points = issues.reduce((total, issue) => total + (issue.points || 0), 0);
-  $("#board-summary").textContent = `${issues.length}개 이슈 · ${points} 포인트`;
+  // On the board the source is the sprint's scope; on the backlog it is
+  // everything not in a sprint. Two questions, two lists.
+  const scoped = state.view === "board"
+    ? (state.board?.issues ?? [])
+    : issues.filter((issue) => !issue.sprint);
+
+  renderSprintLine();
+
+  if (state.view === "board" && !state.board?.sprint) {
+    const conflicted = state.board?.reason === "sprint_conflict";
+    $("#empty-title").textContent = conflicted
+      ? "어느 스프린트가 진행 중인지 확정할 수 없습니다."
+      : "진행 중인 스프린트가 없습니다.";
+    $("#empty-detail").textContent = conflicted
+      ? "ACTIVE 스프린트가 둘 이상입니다. 위 배너에서 충돌한 파일을 확인해 한쪽을 고치면 시작·종료가 다시 허용됩니다."
+      : "설정에서 스프린트를 만들고 시작하면 여기에 스코프가 표시됩니다. 그때까지는 백로그 탭을 쓰세요.";
+    $("#board-empty").hidden = false;
+    board.hidden = true;
+    $("#board-summary").textContent = "";
+    return;
+  }
+
+  $("#board-empty").hidden = scoped.length !== 0;
+  $("#empty-title").textContent = "아직 등록된 이슈가 없습니다.";
+  $("#empty-detail").textContent = "CLI 또는 API에서 이슈를 만들면 여기에 바로 나타납니다.";
+  board.hidden = scoped.length === 0;
+
+  const points = scoped.reduce((total, issue) => total + (issue.points || 0), 0);
+  $("#board-summary").textContent = `${scoped.length}개 이슈 · ${points} 포인트`;
 
   const statuses = [...STATUS_ORDER];
-  for (const status of new Set(issues.map((issue) => issue.status || "BACKLOG"))) {
+  for (const status of new Set(scoped.map((issue) => issue.status || "BACKLOG"))) {
     if (!statuses.includes(status)) statuses.push(status);
   }
 
   for (const status of statuses) {
-    const columnIssues = issues.filter((issue) => (issue.status || "BACKLOG") === status);
+    const columnIssues = scoped.filter((issue) => (issue.status || "BACKLOG") === status);
+    // BLOCKED and CANCELLED appear only when they hold something: a column that
+    // is empty on every board is dead space, but hiding a full one hides work.
     if (!columnIssues.length && ["BLOCKED", "CANCELLED"].includes(status)) continue;
     board.append(renderColumn(status, columnIssues));
   }
+}
+
+async function switchView(view) {
+  if (state.view === view) return;
+  state.view = view;
+  $("#view-board").setAttribute("aria-selected", String(view === "board"));
+  $("#view-backlog").setAttribute("aria-selected", String(view === "backlog"));
+  await refreshIssues();
+}
+
+/**
+ * The board: one sprint's scope, not the whole project.
+ *
+ * A column holding every issue that ever existed answers a different question
+ * from "what are we doing now". The backlog view is the other question, and it
+ * is a separate tab rather than a filter so neither pretends to be the other.
+ */
+async function loadBoard() {
+  const project = $("#project-filter").value || state.issues[0]?.project;
+  if (!project) {
+    state.board = null;
+    return;
+  }
+  try {
+    state.board = await api(`/projects/${encodeURIComponent(project)}/board`);
+  } catch (error) {
+    if (error.status === 401) return void showLogin();
+    state.board = null;
+  }
+}
+
+function renderSprintLine() {
+  const existing = $("#sprint-line");
+  if (existing) existing.remove();
+  if (state.view !== "board" || !state.board?.sprint) return;
+
+  const { sprint, plan } = state.board;
+  const line = element("p", "sprint-line");
+  line.id = "sprint-line";
+  const label = element("strong", "", sprint.name || sprint.id);
+  line.append(label);
+  if (sprint.goal) line.append(document.createTextNode(` — ${sprint.goal}`));
+
+  if (plan) {
+    const total = plan.capacity === null
+      ? `${plan.committed} 포인트`
+      : `${plan.committed} / ${plan.capacity} 포인트`;
+    line.append(document.createTextNode(` · ${total}`));
+    // Advisory, never a block (PRD R6). Said plainly so nobody reads it as a
+    // failure to start.
+    if (plan.over > 0) {
+      line.append(element("span", "sprint-over", ` · capacity 초과 +${plan.over}`));
+    }
+    if (plan.unestimated > 0) {
+      line.append(document.createTextNode(` · 무추정 ${plan.unestimated}건`));
+    }
+  }
+  $("#board").before(line);
 }
 
 function renderColumn(status, issues) {
@@ -191,6 +280,20 @@ function renderCard(issue) {
   if (issue.last_actor_kind) meta.append(actorBadge(issue.last_actor_kind, "card-actor"));
   card.append(meta);
 
+  // Blocked cards say so, and say by what — a mark alone sends the reader
+  // hunting through the links panel for a reason the card already knows.
+  if (issue.claimable === false && issue.blocked_by?.length) {
+    const blocked = element("div", "card-meta");
+    blocked.append(element("span", "card-blocked", `차단 ${issue.blocked_by.join(", ")}`));
+    card.append(blocked);
+  }
+  if (issue.status === "BLOCKED" && issue.blocked_from) {
+    const back = STATUS_LABELS[issue.blocked_from] || issue.blocked_from;
+    // 으로/로 depends on whether the word ends in a consonant. Getting it wrong
+    // reads as broken Korean in the one place the card is trying to be helpful.
+    card.append(element("div", "card-from", `해제 시 ${back}${josaEuro(back)} 복귀`));
+  }
+
   card.tabIndex = 0;
   card.addEventListener("click", () => void openDetail(issue));
   card.addEventListener("keydown", (event) => {
@@ -200,6 +303,14 @@ function renderCard(issue) {
     }
   });
   return card;
+}
+
+/** `으로` after a final consonant, `로` after a vowel or ㄹ. */
+function josaEuro(word) {
+  const last = word.charCodeAt(word.length - 1);
+  if (last < 0xac00 || last > 0xd7a3) return "로";
+  const final = (last - 0xac00) % 28;
+  return final === 0 || final === 8 ? "로" : "으로";
 }
 
 const ACTOR_LABELS = { human: "사람", agent: "에이전트", external: "외부 편집", system: "시스템" };
