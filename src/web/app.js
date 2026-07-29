@@ -463,6 +463,33 @@ async function refreshIndexFacts() {
   // A run already in flight has to be visible, or the only way to find out is
   // to press the button again (AC).
   setIndexBusy(payload.running);
+  await refreshRekeys();
+}
+
+async function refreshRekeys() {
+  let payload;
+  try {
+    payload = await api("/rekeys");
+  } catch {
+    return;
+  }
+
+  const list = $("#rekey-list");
+  list.replaceChildren();
+  $("#rekey-empty").hidden = payload.rekeys.length > 0;
+
+  for (const entry of payload.rekeys) {
+    const item = element("li");
+    const head = element("div", "entry-head");
+    head.append(element("span", "entry-verb", `${entry.from} → ${entry.to}`));
+    head.append(actorBadge("system"));
+    head.append(element("span", "entry-at", formatAt(entry.at)));
+    item.append(head);
+    // The reason matters: a person seeing their key change wants to know it
+    // was a collision and not somebody editing their issue.
+    item.append(element("div", "entry-actor", `${entry.uid} · 사유: ${entry.reason || "—"}`));
+    list.append(item);
+  }
 }
 
 function setIndexBusy(running) {

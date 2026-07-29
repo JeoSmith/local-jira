@@ -4,6 +4,9 @@ import path from "node:path";
 import { buildEvent } from "../domain/events.ts";
 import type { WritableBoard } from "./board.ts";
 import { classify } from "./layout.ts";
+import { patchRekey } from "../domain/update.ts";
+import { planRekeys, type Claimant, type Rekey } from "../domain/rekey.ts";
+import { fileHash } from "./resource.ts";
 import { incrementalSync } from "./reindex.ts";
 import {
   fullReconcile,
@@ -82,6 +85,8 @@ export async function reconcileExternal(
 
 export interface FullReconcileResult extends ReconcileResult {
   report: ReconcileReport;
+  /** Display keys the board moved on its own to settle a collision (§3.8). */
+  rekeyed: Rekey[];
 }
 
 /**
@@ -106,6 +111,7 @@ export async function reconcileFull(
     events: 0,
     removed: report.tombstoned.length,
     report,
+    rekeyed: [],
   };
 
   const record = async (
@@ -161,7 +167,74 @@ export async function reconcileFull(
     await record("issue.deleted", gone.path, gone.uid, { key: gone.key, path: gone.path });
   }
 
+  // Last, and only on a full pass: the plan needs the whole merged set, and a
+  // pull is the only way two clones' keys end up in the same tree.
+  result.rekeyed = await applyRekeys(writable);
+
   return result;
+}
+
+/**
+ * Resolves display-key collisions left by a merge.
+ *
+ * Runs after the index is current, because the plan is computed from the whole
+ * merged file set and nothing smaller will do (§3.8). Writes go through the
+ * ordinary writer, so a crash mid-rekey replays like any other write — and
+ * because the plan is deterministic, recomputing it after that crash reaches
+ * the same answer rather than pushing the keys along a second time.
+ */
+export async function applyRekeys(writable: WritableBoard): Promise<Rekey[]> {
+  const board = writable.board;
+  const projects = (
+    board.db
+      .prepare("SELECT DISTINCT project FROM issues WHERE state = 'OK'")
+      .all() as Array<{ project: string }>
+  ).map((row) => row.project);
+
+  const applied: Rekey[] = [];
+
+  for (const project of projects) {
+    const claimants = (
+      board.db
+        .prepare("SELECT uid, key, path FROM issues WHERE project = ? AND state = 'OK'")
+        .all(project) as Claimant[]
+    ).map((row) => ({ ...row }));
+
+    for (const rekey of planRekeys({ project, claimants })) {
+      const absolute = path.join(board.boardRoot, rekey.path);
+      if (!fs.existsSync(absolute)) {
+        continue;
+      }
+      const original = fs.readFileSync(absolute, "utf8");
+      const patched = patchRekey(original, rekey.from, rekey.to);
+      if (patched === original) {
+        continue;
+      }
+
+      await writable.writer.write({
+        kind: "update",
+        targetPath: rekey.path,
+        contents: patched,
+        expectedHash: fileHash(Buffer.from(original, "utf8")),
+        event: buildEvent(board.localDirectory, {
+          verb: "issue.rekeyed",
+          targetKind: "issue",
+          targetUid: rekey.uid,
+          // Nobody asked for this. The board did it to keep two offline
+          // creations from claiming one key, and the record has to say so.
+          actor: { id: null, kind: "system" },
+          before: { key: rekey.from },
+          after: { key: rekey.to },
+          detail: { reason: "duplicate_key", path: rekey.path },
+        }),
+        actorId: null,
+        actorKind: "system",
+      });
+      applied.push(rekey);
+    }
+  }
+
+  return applied;
 }
 
 /** Only entities a person edits produce an external event. */
