@@ -255,7 +255,7 @@ test("an unknown or tampered token is refused", async (t) => {
   }
 });
 
-test("a token cannot write until its scopes are enforced", async (t) => {
+test("a token does what its scopes name, and nothing beside them", async (t) => {
   const s = await session(t);
   const issued = await call(s.server, "POST", "/tokens", {
     cookie: s.admin,
@@ -263,15 +263,22 @@ test("a token cannot write until its scopes are enforced", async (t) => {
   });
   const secret = issued.json.token as unknown as string;
 
-  // r13a authenticates; r13b maps scopes to routes. In between the safe
-  // direction to be wrong in is closed, so holding `issue:edit` is not yet
-  // enough to write.
   const created = await call(s.server, "POST", "/issues", {
     bearer: secret,
     body: { project: "LJ", type: "task", title: "토큰이 만든 이슈" },
   });
-  assert.equal(created.status, 403);
-  assert.equal(created.json.error?.code, "E_TOKEN_SCOPE");
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+
+  // `issue:edit` is not `issue:rank`, and D9 keeps the two apart on purpose:
+  // an agent may fix an issue without deciding what the team does next.
+  const ranked = await call(
+    s.server,
+    "POST",
+    `/issues/${created.json.key as unknown as string}/rank`,
+    { bearer: secret, body: { field: "backlog_rank", after: null, before: null } },
+  );
+  assert.equal(ranked.status, 403);
+  assert.equal(ranked.json.error?.code, "E_TOKEN_SCOPE");
 });
 
 test("a member may issue their own token but not somebody else's", async (t) => {

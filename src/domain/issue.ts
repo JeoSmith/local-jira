@@ -86,6 +86,14 @@ export interface CreateIssueInput {
 export interface Actor {
   id: string;
   kind: "human" | "agent";
+  /**
+   * The PAT that authenticated the request, when one did.
+   *
+   * Carried on the actor rather than passed alongside it, because every event
+   * an action produces has to name it (AC16) and a parallel parameter is one
+   * each call site can forget.
+   */
+  tokenId?: string | null;
 }
 
 export async function createIssue(
@@ -162,7 +170,7 @@ export async function createIssue(
       verb: "issue.created",
       targetKind: "issue",
       targetUid: uid,
-      actor: { id: actor.id, kind: actor.kind },
+      actor,
       after: { key, type, title, status: INITIAL_STATUS, points },
       at: now,
     }),

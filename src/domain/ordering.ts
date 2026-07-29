@@ -235,7 +235,7 @@ async function writeRank(
       verb: "issue.updated",
       targetKind: "issue",
       targetUid: row.uid,
-      actor: { id: actor.id, kind: actor.kind },
+      actor,
       before: { [field]: detail.from },
       after: { [field]: detail.to },
       detail: {
