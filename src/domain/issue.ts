@@ -42,7 +42,9 @@ export type IssueErrorCode =
   | "E_INVALID_LINK_KIND"
   | "E_LINK_SELF"
   | "E_LINK_TARGET_NOT_FOUND"
-  | "E_LINK_NOT_FOUND";
+  | "E_LINK_NOT_FOUND"
+  | "E_INVALID_INSTANT"
+  | "E_SPRINT_NOT_DELETABLE";
 
 export class IssueError extends Error {
   readonly code: IssueErrorCode;
