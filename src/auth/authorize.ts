@@ -13,6 +13,8 @@ export type Capability =
   | "issue:write"
   | "issue:delete"
   | "issue:rank"
+  | "index:rebuild"
+  | "index:verify"
   | "claim:release"
   | "user:manage"
   | "token:manage";
@@ -21,11 +23,17 @@ const CAPABILITIES: Record<Role, Capability[]> = {
   admin: [
     "issue:read", "issue:write", "issue:delete", "issue:rank",
     "claim:release", "user:manage", "token:manage",
+    "index:rebuild", "index:verify",
   ],
   // S1-D11: a member may delete anyone's issue. The event names who did it and
   // the file is in git, so the damage is visible and reversible; restricting it
   // to admin would block the common case of a one-person board.
-  member: ["issue:read", "issue:write", "issue:delete", "issue:rank", "claim:release"],
+  // Verify only reads and reports; a rebuild swaps the index generation and
+  // pauses writes while it does, which is an operational act (설계 §3.7).
+  member: [
+    "issue:read", "issue:write", "issue:delete", "issue:rank", "claim:release",
+    "index:verify",
+  ],
   // An agent's session role grants nothing beyond reading. Its real permissions
   // come from the token's scopes (D9, enforced in r13b), so leaving write here
   // would be a second, weaker gate that quietly overrides the first.

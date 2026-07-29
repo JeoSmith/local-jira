@@ -176,3 +176,23 @@ form button:disabled { opacity: .55; cursor: wait; }
   .integrity-item { border-top-color: #2c342e; }
   .integrity-fix { background: #222a25; color: #bfe6cf; }
 }
+
+/* ── settings: index status and operations (r21) ───────────────────────── */
+.ghost-button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.ghost-button:hover { background: rgba(0,0,0,.04); }
+.settings-view { margin: 0 3vw 24px; padding: 18px 20px; border: 1px solid var(--line);
+  border-radius: 13px; background: #fff; }
+.index-facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 0 0 16px; font-size: 13px; }
+.index-facts dt { color: var(--muted); }
+.index-facts dd { margin: 0; }
+.index-actions { display: flex; gap: 9px; }
+.index-actions button { padding: 8px 15px; border: 1px solid var(--line); border-radius: 9px;
+  background: #f5f7f5; font: inherit; font-size: 13px; cursor: pointer; }
+.index-actions button:disabled { opacity: .5; cursor: progress; }
+
+@media (prefers-color-scheme: dark) {
+  .ghost-button:hover { background: rgba(255,255,255,.06); }
+  .settings-view { border-color: #2c342e; background: #1a1f1c; }
+  .index-actions button { background: #222a25; border-color: #2c342e; color: #dfe6e1; }
+}
