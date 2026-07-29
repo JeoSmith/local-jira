@@ -392,3 +392,71 @@ test("rebuilds a 5,000 issue board within the budget", { timeout: 120_000 }, (t)
   const unchanged = incrementalSync(board.root, db);
   assert.equal(unchanged.hashed, 0, "an unchanged restart must not read any file");
 });
+
+const TWO_USERS =
+  "schema_version: 1\nusers:\n" +
+  "  - id: u_admin\n    display_name: Admin\n    role: admin\n" +
+  "  - id: u_bob\n    display_name: Bob\n    role: member\n";
+
+function userIds(db: ReturnType<typeof open>): string[] {
+  return (db.prepare("SELECT id FROM users ORDER BY id").all() as Array<{ id: string }>)
+    .map((row) => row.id);
+}
+
+test("a user dropped from users.yaml loses their row on the next sync", (t) => {
+  const board = makeBoard(t);
+  seed(board);
+  board.write("users.yaml", TWO_USERS);
+  const { db } = rebuild(board);
+  t.after(() => db.close());
+  assert.deepEqual(userIds(db), ["u_admin", "u_bob"]);
+
+  // One file holds the whole set, so removing somebody is an edit, not a
+  // deleted file. Merging the edit in left the row — and `role` is what decides
+  // permission, so the account stayed usable until the next full rebuild.
+  board.write(
+    "users.yaml",
+    "schema_version: 1\nusers:\n  - id: u_admin\n    display_name: Admin\n    role: admin\n",
+  );
+  incrementalSync(board.root, db);
+
+  assert.deepEqual(userIds(db), ["u_admin"]);
+});
+
+test("adding a user and changing a role still apply", (t) => {
+  const board = makeBoard(t);
+  seed(board);
+  const { db } = rebuild(board);
+  t.after(() => db.close());
+
+  board.write(
+    "users.yaml",
+    "schema_version: 1\nusers:\n" +
+      "  - id: u_admin\n    display_name: Admin\n    role: member\n" +
+      "  - id: u_carol\n    display_name: Carol\n    role: admin\n",
+  );
+  incrementalSync(board.root, db);
+
+  assert.deepEqual(userIds(db), ["u_admin", "u_carol"]);
+  assert.equal(db.prepare("SELECT role FROM users WHERE id='u_admin'").get()?.role, "member");
+});
+
+test("a users.yaml that is not a user list is quarantined, and the set survives", (t) => {
+  const board = makeBoard(t);
+  seed(board);
+  board.write("users.yaml", TWO_USERS);
+  const { db } = rebuild(board);
+  t.after(() => db.close());
+
+  // Valid YAML, wrong shape. Read as "no users" this would sign everyone out of
+  // their own board — the failure the replacement above could otherwise cause.
+  board.write("users.yaml", "schema_version: 1\nusers:\n  admin: true\n");
+  const stats = incrementalSync(board.root, db);
+
+  assert.equal(stats.failed, 1);
+  assert.deepEqual(userIds(db), ["u_admin", "u_bob"], "the last good set is still there");
+  assert.equal(
+    db.prepare("SELECT reason FROM index_errors WHERE path='users.yaml'").get()?.reason,
+    "schema_invalid",
+  );
+});

@@ -17,7 +17,11 @@ export type ResourceErrorReason =
   | "yaml_error"
   | "yaml_unsupported"
   | "reserved_field"
-  | "conflict_marker";
+  | "conflict_marker"
+  // Valid YAML that is not the shape the file is supposed to hold. Separate
+  // from `yaml_error` because the repair is different: the syntax is fine and
+  // what needs fixing is the structure.
+  | "schema_invalid";
 
 export class ResourceParseError extends Error {
   readonly reason: ResourceErrorReason;

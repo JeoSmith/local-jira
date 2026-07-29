@@ -169,11 +169,31 @@ function configRecords(
   };
 }
 
+/**
+ * The whole user set, from the one file that holds it.
+ *
+ * Every other kind is one file per entity, so removing one is removing a file
+ * and `clearFile` handles it. `users.yaml` is the exception: the set lives
+ * inside a single file, so applying it has to *replace* the set rather than
+ * merge into it. Merging is what let a user deleted from the file keep their
+ * row — and with it their role, which is what decides permission.
+ */
 function userRecords(
   identity: FileIdentity,
   parsed: ParsedResource,
 ): FileRecords {
   const row = parsed.resource as Row;
+
+  // Checked here, before `clearFile` runs, so a malformed file is quarantined
+  // with the previous set intact. An absent or non-list `users` would otherwise
+  // read as "no users" and empty the board of everyone who can sign in.
+  if (!Array.isArray(row.users)) {
+    throw new ResourceParseError(
+      "schema_invalid",
+      "users.yaml must have a `users:` list, even when it is empty.",
+    );
+  }
+
   return {
     identity,
     uid: null,
