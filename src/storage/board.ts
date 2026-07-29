@@ -19,6 +19,16 @@ export interface BoardHandle {
   db: DatabaseSync;
   /** How the index was brought up to date for this command. */
   refresh: { mode: "rebuilt" | "incremental"; reason: string; stats: ReindexStats };
+  /**
+   * Rebuilds the index and swaps this handle onto the new generation.
+   *
+   * The old database keeps serving reads until the new one is complete, then
+   * the handle points at the new one and the old connection is closed. Nothing
+   * caches `db`, so every caller picks up the swap on its next statement —
+   * which is what stops readers and writers ending up on different databases
+   * (설계 §3.7).
+   */
+  refreshIndex(): ReindexStats;
   close(): void;
 }
 
@@ -172,13 +182,21 @@ function handle(
   db: DatabaseSync,
   refresh: BoardHandle["refresh"],
 ): BoardHandle {
-  return {
+  const board: BoardHandle = {
     boardRoot,
     localDirectory,
     db,
     refresh,
-    close: () => db.close(),
+    refreshIndex: () => {
+      const previous = board.db;
+      const built = rebuildIndex(boardRoot, localDirectory, previous);
+      board.db = built.db;
+      board.refresh = { mode: "rebuilt", reason: "requested", stats: built.stats };
+      return built.stats;
+    },
+    close: () => board.db.close(),
   };
+  return board;
 }
 
 export interface IndexStatus {

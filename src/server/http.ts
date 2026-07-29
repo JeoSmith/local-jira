@@ -46,6 +46,7 @@ import { RankSpaceExhausted } from "../domain/rank.ts";
 import { canonicalJson, type JsonValue } from "../storage/jcs.ts";
 import {
   findIssue,
+  indexStatus,
   listIssues,
   openBoardForWriting,
   type BoardHandle,
@@ -83,6 +84,11 @@ interface RequestContext {
   store: CredentialStore;
   stream: EventStream;
   user: UserRecord | null;
+  reconcile(reason?: ReconcileReason | null): Promise<void>;
+  /** False when the write queue waited out its limit and should 503. */
+  awaitWriteGate(): Promise<boolean>;
+  closeWriteGate(running: Promise<void>): Promise<void>;
+  indexBusy(): boolean;
 }
 
 const WEB_ASSETS = new Map([
@@ -116,6 +122,28 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   // a heartbeat. Read from the index after every pass instead of threaded out
   // of the reconcile: both the incremental and the full path can release or
   // create a quarantine, and only one of them returns a report.
+  /**
+   * Held shut while the index generation is swapped.
+   *
+   * Queued rather than refused, so an ordinary write during a rebuild waits a
+   * moment instead of failing — but bounded, because a caller blocked with no
+   * end in sight is worse than one told to come back (설계 §3.7). A verify does
+   * not touch this: it only reads and reports.
+   */
+  let writeGate: Promise<void> | null = null;
+  const WRITE_QUEUE_LIMIT_MS = 30_000;
+
+  const awaitWriteGate = async (): Promise<boolean> => {
+    if (writeGate === null) {
+      return true;
+    }
+    const timedOut = Symbol("timeout");
+    const timer = new Promise<typeof timedOut>((resolve) => {
+      setTimeout(() => resolve(timedOut), WRITE_QUEUE_LIMIT_MS).unref?.();
+    });
+    return (await Promise.race([writeGate, timer])) !== timedOut;
+  };
+
   let announcedIntegrity = "";
   const announceIntegrity = (): void => {
     const health = boardHealth(board.db);
@@ -187,7 +215,17 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   }
 
   const server = http.createServer((request, response) => {
-    handle(request, response, { writable, board, store, stream, user: null }).catch((error) => {
+    handle(request, response, {
+      writable, board, store, stream, user: null,
+      reconcile, awaitWriteGate,
+      closeWriteGate: (running: Promise<void>) => {
+        writeGate = running.finally(() => {
+          writeGate = null;
+        });
+        return writeGate;
+      },
+      indexBusy: () => writeGate !== null,
+    }).catch((error) => {
       respondError(response, 500, "E_INTERNAL", describe(error));
     });
   });
@@ -242,6 +280,20 @@ async function handle(
   }
   if (route === "POST /auth/logout") {
     return logout(request, response, context);
+  }
+
+  // A domain write during a rebuild waits for the generation swap rather than
+  // failing — but not forever. Past the limit the honest answer is "come back",
+  // with a Retry-After, instead of a request that never returns (설계 §3.7).
+  if (request.method !== "GET" && !url.pathname.startsWith("/auth/")) {
+    if (!(await context.awaitWriteGate())) {
+      response.setHeader("Retry-After", "30");
+      return respondError(
+        response, 503, "E_INDEX_REBUILDING",
+        "The index is being rebuilt and the write queue is full.",
+        "Try again in a moment.",
+      );
+    }
   }
 
   // Everything below is a domain route, so it needs an authenticated actor.
@@ -360,6 +412,17 @@ async function handle(
       return activityRoute(rest.slice(0, -"/activity".length), url, response, authed);
     }
     return showIssueRoute(rest, response, authed);
+  }
+  if (route === "GET /index") {
+    return guard(response, authed, "issue:read", () => {
+      respondJson(response, 200, indexReport(authed));
+    });
+  }
+  if (route === "POST /index/rebuild") {
+    return guard(response, authed, "index:rebuild", () => rebuildRoute(response, authed));
+  }
+  if (route === "POST /index/verify") {
+    return guard(response, authed, "index:verify", () => verifyRoute(response, authed));
   }
   if (route === "GET /integrity/issues") {
     return guard(response, authed, "issue:read", () => {
@@ -946,6 +1009,112 @@ async function rankRoute(
       );
     }
     return handleWriteError(error, response);
+  }
+}
+
+/** What the settings screen shows about the index. */
+function indexReport(context: RequestContext): Record<string, unknown> {
+  const status = indexStatus(context.board);
+  const health = boardHealth(context.board.db);
+  return {
+    boardPath: status.boardPath,
+    schemaVersion: status.schemaVersion,
+    lastRebuildAt: status.lastRebuildAt,
+    lastVerifyAt: lastVerifyAt,
+    counts: status.counts,
+    quarantined: status.errors.length,
+    sprintConflicts: health.sprintConflicts,
+    running: context.indexBusy() ? "rebuild" : verifying ? "verify" : null,
+  };
+}
+
+// Module-level rather than per-request: two callers pressing the same button
+// must see one run, not two (AC), and the report has to say so.
+let verifying = false;
+let lastVerifyAt: string | null = null;
+
+/**
+ * Rebuilds the index from files, swapping generations underneath the readers.
+ *
+ * Domain writes queue while the swap happens rather than failing, but only for
+ * a bounded wait: a caller blocked with no end in sight is worse off than one
+ * told to come back (설계 §3.7). Reads never pause — the previous generation
+ * keeps serving until the new one is complete.
+ */
+async function rebuildRoute(
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  if (context.indexBusy()) {
+    return respondError(
+      response, 409, "E_INDEX_BUSY",
+      "A rebuild is already running.",
+    );
+  }
+
+  const started = Date.now();
+  let settle: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  void context.closeWriteGate(gate);
+
+  try {
+    const before = indexStatus(context.board).counts;
+    context.board.refreshIndex();
+    const after = indexStatus(context.board).counts;
+
+    respondJson(response, 200, {
+      rebuilt: true,
+      durationMs: Date.now() - started,
+      counts: after,
+      // Reported so a caller can see the rebuild agreed with what was there,
+      // which is the whole claim being made (AC2).
+      unchanged: JSON.stringify(before) === JSON.stringify(after),
+    });
+  } catch (error) {
+    respondError(response, 500, "E_INDEX_REBUILD_FAILED", describe(error));
+  } finally {
+    settle();
+  }
+}
+
+/**
+ * Re-hashes every file rather than trusting `(mtime, size)`.
+ *
+ * The case this exists for: a file whose content changed while its stat fields
+ * did not. Startup narrows candidates by metadata and would sail past it, so
+ * "verify" means exactly "do not narrow" (설계 §3.7).
+ */
+async function verifyRoute(
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  if (verifying) {
+    return respondError(response, 409, "E_INDEX_BUSY", "A verification is already running.");
+  }
+
+  verifying = true;
+  const started = Date.now();
+  try {
+    const before = quarantineList(context.board.db).length;
+    // A full reconcile *is* the verification: it hashes everything it scans.
+    await context.reconcile("manual");
+    const after = quarantineList(context.board.db).length;
+    lastVerifyAt = new Date().toISOString();
+
+    respondJson(response, 200, {
+      verified: true,
+      durationMs: Date.now() - started,
+      quarantinedBefore: before,
+      quarantinedAfter: after,
+      newlyQuarantined: Math.max(0, after - before),
+      released: Math.max(0, before - after),
+    });
+  } catch (error) {
+    respondError(response, 500, "E_INDEX_VERIFY_FAILED", describe(error));
+  } finally {
+    verifying = false;
   }
 }
 

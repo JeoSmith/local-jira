@@ -37,6 +37,7 @@
             <span>Local Jira</span>
           </div>
           <div class="topbar-actions">
+          <button id="settings-toggle" type="button" class="ghost-button">설정</button>
             <span id="live-status" class="live-status"><i></i> 연결 중</span>
             <span class="divider" aria-hidden="true"></span>
             <span id="user-name" class="user-name"></span>
@@ -75,6 +76,17 @@
           <p>CLI 또는 API에서 이슈를 만들면 이 보드에 바로 나타납니다.</p>
         </div>
         <div id="board" class="board"></div>
+      </section>
+
+      <section id="settings-view" class="settings-view" hidden aria-label="설정">
+        <h2 class="detail-section">인덱스</h2>
+        <dl id="index-facts" class="index-facts"></dl>
+        <div class="index-actions">
+          <button id="index-verify" type="button">전체 검증</button>
+          <button id="index-rebuild" type="button">전체 재인덱스</button>
+        </div>
+        <p id="index-progress" class="integrity-detail" hidden></p>
+        <p id="index-result" class="integrity-fix" hidden></p>
       </section>
 
       <aside id="detail" class="detail" hidden aria-label="이슈 상세">

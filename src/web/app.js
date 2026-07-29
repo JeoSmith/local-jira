@@ -27,6 +27,9 @@ $("#logout-button").addEventListener("click", logout);
 $("#project-filter").addEventListener("change", renderBoard);
 $("#detail-close").addEventListener("click", closeDetail);
 $("#integrity-banner").addEventListener("click", toggleIntegrity);
+$("#settings-toggle").addEventListener("click", toggleSettings);
+$("#index-verify").addEventListener("click", () => void runIndexOp("verify"));
+$("#index-rebuild").addEventListener("click", () => void runIndexOp("rebuild"));
 $("#timeline-more").addEventListener("click", () => void loadActivity(true));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && state.detail) closeDetail();
@@ -416,6 +419,88 @@ function groupBy(items, pick) {
     groups.get(key).push(item);
   }
   return groups;
+}
+
+const COUNT_LABELS = {
+  issues: "이슈", comments: "코멘트", sprints: "스프린트",
+  runs: "run", events: "이벤트", projects: "프로젝트", files: "파일",
+};
+
+async function toggleSettings() {
+  const view = $("#settings-view");
+  view.hidden = !view.hidden;
+  if (!view.hidden) await refreshIndexFacts();
+}
+
+async function refreshIndexFacts() {
+  let payload;
+  try {
+    payload = await api("/index");
+  } catch (error) {
+    if (error.status === 401) return void showLogin();
+    return;
+  }
+
+  const facts = $("#index-facts");
+  facts.replaceChildren();
+  const row = (label, value) => {
+    facts.append(element("dt", "", label));
+    facts.append(element("dd", "", value));
+  };
+
+  row("마지막 인덱싱", payload.lastRebuildAt ? formatAt(payload.lastRebuildAt) : "기록 없음");
+  row("마지막 전체 검증", payload.lastVerifyAt ? formatAt(payload.lastVerifyAt) : "기록 없음");
+  row(
+    "인덱싱된 항목",
+    Object.entries(payload.counts || {})
+      .filter(([key]) => COUNT_LABELS[key])
+      .map(([key, count]) => `${COUNT_LABELS[key]} ${count}`)
+      .join(" · "),
+  );
+  row("격리", `${payload.quarantined}건`);
+  if (payload.sprintConflicts?.length) row("스프린트 충돌", payload.sprintConflicts.join(", "));
+
+  // A run already in flight has to be visible, or the only way to find out is
+  // to press the button again (AC).
+  setIndexBusy(payload.running);
+}
+
+function setIndexBusy(running) {
+  const progress = $("#index-progress");
+  $("#index-verify").disabled = Boolean(running);
+  $("#index-rebuild").disabled = Boolean(running);
+  progress.hidden = !running;
+  if (running) {
+    progress.textContent =
+      running === "rebuild" ? "전체 재인덱스 실행 중… 쓰기 요청은 대기합니다." : "전체 검증 실행 중…";
+  }
+}
+
+async function runIndexOp(kind) {
+  setIndexBusy(kind);
+  $("#index-result").hidden = true;
+
+  try {
+    const payload = await api(`/index/${kind}`, { method: "POST" });
+    const result = $("#index-result");
+    result.textContent =
+      kind === "rebuild"
+        ? `재인덱스 완료 — ${payload.durationMs}ms, 결과가 이전과 ${payload.unchanged ? "동일합니다" : "다릅니다"}.`
+        : `검증 완료 — ${payload.durationMs}ms, 신규 격리 ${payload.newlyQuarantined}건 · 해소 ${payload.released}건.`;
+    result.hidden = false;
+  } catch (error) {
+    const result = $("#index-result");
+    result.textContent =
+      error.status === 403
+        ? "권한이 없습니다. 전체 재인덱스는 admin만 실행할 수 있습니다."
+        : error.message || "실행하지 못했습니다.";
+    result.hidden = false;
+  } finally {
+    setIndexBusy(null);
+    await refreshIndexFacts();
+    await refreshIssues();
+    await refreshIntegrity();
+  }
 }
 
 function connectEvents() {
