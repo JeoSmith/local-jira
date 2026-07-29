@@ -79,6 +79,8 @@ export interface CreateIssueInput {
   parent?: string | null;
   /** Rejected if present — see S1-D1. Accepted as a parameter only to say so. */
   status?: string;
+  /** Forwarded to the write journal so a crash mid-create is still idempotent. */
+  idempotency?: { actorId: string; key: string };
 }
 
 export interface Actor {
@@ -166,6 +168,7 @@ export async function createIssue(
     }),
     actorId: actor.id,
     actorKind: actor.kind,
+    idempotency: input.idempotency,
   });
 
   const found = findIssue(board, key);

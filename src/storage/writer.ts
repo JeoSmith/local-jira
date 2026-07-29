@@ -30,6 +30,15 @@ export interface WriteRequest {
   };
   actorId: string | null;
   actorKind: string;
+  /**
+   * The idempotency key this write is answering, when there is one.
+   *
+   * Recorded here rather than at the route because this is the moment the
+   * write becomes durable. A crash immediately after leaves a reservation that
+   * still knows which file the key produced, and a retry is answered from that
+   * instead of creating a second one (r15 AC10).
+   */
+  idempotency?: { actorId: string; key: string };
 }
 
 export interface ReplayOutcome {
@@ -120,6 +129,13 @@ export class BoardWriter {
       actorId: request.actorId,
       actorKind: request.actorKind,
     });
+    if (request.idempotency) {
+      this.#outbox.noteIdempotencyTarget(
+        request.idempotency.actorId,
+        request.idempotency.key,
+        request.targetPath,
+      );
+    }
     crashPoint("after_outbox");
 
     this.#applyFrom(record, "PENDING", false);
