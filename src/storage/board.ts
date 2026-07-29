@@ -247,52 +247,132 @@ export interface IssueSummary {
 
 export interface ListIssuesOptions {
   project?: string;
-  status?: string;
+  /** Repeated values are alternatives; different fields are all required. */
+  status?: string[];
+  type?: string[];
+  assignee?: string[];
+  label?: string[];
+  sprint?: string[];
+  /** Excludes issues held up by an unfinished blocker (r02b). */
+  claimable?: boolean;
   limit?: number;
+  /** `(backlog_rank, uid)` of the last row of the previous page. */
+  after?: { rank: string | null; uid: string } | null;
 }
 
+export interface IssuePage {
+  issues: IssueSummary[];
+  hasMore: boolean;
+  nextAfter: { rank: string | null; uid: string } | null;
+}
+
+/**
+ * Lists issues under structured filters.
+ *
+ * Repeated values of one parameter are alternatives (`status=TODO&status=DONE`
+ * means either), and different parameters all have to hold. One rule for every
+ * field, because a filter that means AND for labels and OR for statuses is a
+ * filter people have to test to believe.
+ *
+ * Paged by `(backlog_rank, uid)` rather than by offset. The list reorders —
+ * that is its whole purpose — and an offset into a list that moved skips some
+ * rows and repeats others without saying so.
+ */
 export function listIssues(
   board: BoardHandle,
   options: ListIssuesOptions = {},
-): IssueSummary[] {
-  const where: string[] = ["state = 'OK'"];
+): IssuePage {
+  const where: string[] = ["i.state = 'OK'"];
   const params: unknown[] = [];
 
+  const anyOf = (column: string, values: string[] | undefined): void => {
+    if (!values || values.length === 0) {
+      return;
+    }
+    where.push(`${column} IN (${values.map(() => "?").join(",")})`);
+    params.push(...values);
+  };
+
   if (options.project) {
-    where.push("project = ?");
+    where.push("i.project = ?");
     params.push(options.project);
   }
-  if (options.status) {
-    where.push("status = ?");
-    params.push(options.status.toUpperCase());
+  anyOf("i.status", options.status?.map((value) => value.toUpperCase()));
+  anyOf("i.type", options.type?.map((value) => value.toLowerCase()));
+  anyOf("i.assignee_id", options.assignee);
+  anyOf("i.sprint_id", options.sprint);
+
+  if (options.label && options.label.length > 0) {
+    where.push(
+      `EXISTS (SELECT 1 FROM issue_labels l WHERE l.uid = i.uid
+                AND l.label IN (${options.label.map(() => "?").join(",")}))`,
+    );
+    params.push(...options.label);
   }
 
+  if (options.claimable === true) {
+    // An unfinished blocker is one declared from either side: `X blocked_by Y`
+    // on X, or `Y blocks X` on Y. Both mean the same relation (S1-D4), so both
+    // have to be looked at or half the blockers would be invisible here.
+    where.push(
+      `NOT EXISTS (
+         SELECT 1 FROM issue_links k JOIN issues b ON b.uid = k.to_uid
+          WHERE k.from_uid = i.uid AND k.kind = 'blocked_by'
+            AND b.state = 'OK' AND b.status NOT IN ('DONE','CANCELLED')
+       ) AND NOT EXISTS (
+         SELECT 1 FROM issue_links k JOIN issues b ON b.uid = k.from_uid
+          WHERE k.to_uid = i.uid AND k.kind = 'blocks'
+            AND b.state = 'OK' AND b.status NOT IN ('DONE','CANCELLED')
+       )`,
+    );
+  }
+
+  if (options.after) {
+    // Strictly after the cursor in the same order the rows come back in.
+    where.push(
+      `(COALESCE(i.backlog_rank, char(255)) > COALESCE(?, char(255))
+        OR (COALESCE(i.backlog_rank, char(255)) = COALESCE(?, char(255)) AND i.uid > ?))`,
+    );
+    params.push(options.after.rank, options.after.rank, options.after.uid);
+  }
+
+  const limit = Math.min(Math.max(options.limit ?? 50, 1), 500);
   const rows = board.db
     .prepare(
-      `SELECT path, uid, project, key, type, status, title, points, assignee_id, sprint_id,
-              created_by_kind
-         FROM issues
+      `SELECT i.path, i.uid, i.project, i.key, i.type, i.status, i.title, i.points,
+              i.assignee_id, i.sprint_id, i.backlog_rank, i.created_by_kind
+         FROM issues i
         WHERE ${where.join(" AND ")}
-        ORDER BY backlog_rank, uid
+        ORDER BY i.backlog_rank, i.uid
         LIMIT ?`,
     )
-    .all(...params, options.limit ?? 50) as Array<Record<string, string | number | null>>;
+    .all(...params, limit + 1) as Array<Record<string, string | number | null>>;
 
-  return rows.map((row) => ({
-    key: String(row.key),
-    uid: String(row.uid),
-    project: String(row.project),
-    type: row.type as string | null,
-    status: row.status as string | null,
-    title: row.title as string | null,
-    points: row.points as number | null,
-    assignee: row.assignee_id as string | null,
-    sprint: row.sprint_id as string | null,
-    // Carried alongside the last actor, never instead of it: one says who made
-    // the issue and never changes, the other says who touched it last (§5.1).
-    createdByKind: row.created_by_kind as string | null,
-    labels: labelsOf(board, String(row.path)),
-  }));
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+
+  return {
+    issues: page.map((row) => ({
+      key: String(row.key),
+      uid: String(row.uid),
+      project: String(row.project),
+      type: row.type as string | null,
+      status: row.status as string | null,
+      title: row.title as string | null,
+      points: row.points as number | null,
+      assignee: row.assignee_id as string | null,
+      sprint: row.sprint_id as string | null,
+      // Carried alongside the last actor, never instead of it: one says who made
+      // the issue and never changes, the other says who touched it last (§5.1).
+      createdByKind: row.created_by_kind as string | null,
+      labels: labelsOf(board, String(row.path)),
+    })),
+    hasMore,
+    nextAfter: hasMore && last
+      ? { rank: (last.backlog_rank as string | null) ?? null, uid: String(last.uid) }
+      : null,
+  };
 }
 
 function labelsOf(board: BoardHandle, issuePath: string): string[] {

@@ -245,7 +245,7 @@ test("rejects input it cannot store faithfully", async (t) => {
     "E_INVALID_POINTS",
     "E_INVALID_LABEL",
   ]);
-  assert.equal(listIssues(board.board).length, 0, "no file may be written for a rejected request");
+  assert.equal(listIssues(board.board).issues.length, 0, "no file may be written for a rejected request");
 });
 
 test("keeps null points distinct from zero", async (t) => {

@@ -103,7 +103,7 @@ test("builds the index on first open and reuses it afterwards", (t) => {
   const first = openBoard(sandbox.repo);
   assert.equal(first.refresh.mode, "rebuilt");
   assert.equal(first.refresh.reason, "fresh");
-  assert.equal(listIssues(first).length, 1);
+  assert.equal(listIssues(first).issues.length, 1);
   first.close();
 
   const second = openBoard(sandbox.repo);
@@ -122,7 +122,7 @@ test("picks up a file edited outside the tool", (t) => {
   const board = openBoard(sandbox.repo);
   t.after(() => board.close());
 
-  assert.equal(listIssues(board)[0].points, 5);
+  assert.equal(listIssues(board).issues[0].points, 5);
 });
 
 test("filters and orders the issue list", (t) => {
@@ -134,15 +134,15 @@ test("filters and orders the issue list", (t) => {
   const board = openBoard(sandbox.repo);
   t.after(() => board.close());
 
-  assert.deepEqual(listIssues(board).map((i) => i.key), ["LJ-1", "LJ-2", "LJ-3"]);
+  assert.deepEqual(listIssues(board).issues.map((i) => i.key), ["LJ-1", "LJ-2", "LJ-3"]);
   assert.deepEqual(
-    listIssues(board, { status: "todo" }).map((i) => i.key),
+    listIssues(board, { status: ["todo"] }).issues.map((i) => i.key),
     ["LJ-2", "LJ-3"],
     "status matching is case-insensitive",
   );
-  assert.deepEqual(listIssues(board, { limit: 1 }).map((i) => i.key), ["LJ-1"]);
-  assert.deepEqual(listIssues(board, { project: "OTHER" }), []);
-  assert.deepEqual(listIssues(board)[0].labels, ["core"]);
+  assert.deepEqual(listIssues(board, { limit: 1 }).issues.map((i) => i.key), ["LJ-1"]);
+  assert.deepEqual(listIssues(board, { project: "OTHER" }).issues, []);
+  assert.deepEqual(listIssues(board).issues[0].labels, ["core"]);
 });
 
 test("finds an issue by its current key and by a former key", (t) => {
