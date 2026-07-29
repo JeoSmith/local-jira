@@ -41,8 +41,12 @@ import {
   deleteSprint,
   findSprint,
   listSprints,
+  closeSprint,
   planOf,
+  SprintConflictError,
   SprintNotEmptyError,
+  SprintStateError,
+  startSprint,
   updateSprint,
 } from "../domain/sprint.ts";
 import {
@@ -463,6 +467,16 @@ async function handle(
   if (sprintCollection && request.method === "POST") {
     return guard(response, authed, "sprint:write", () =>
       createSprintRoute(decodeURIComponent(sprintCollection[1]), request, response, authed),
+    );
+  }
+
+  const sprintCommand = /^\/sprints\/([^/]+)\/(start|close)$/.exec(url.pathname);
+  if (sprintCommand && request.method === "POST") {
+    const id = decodeURIComponent(sprintCommand[1]);
+    return guard(response, authed, "sprint:write", () =>
+      sprintCommand[2] === "start"
+        ? startSprintRoute(id, response, authed)
+        : closeSprintRoute(id, request, response, authed),
     );
   }
 
@@ -1023,6 +1037,21 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
       path: error.path,
     });
   }
+  if (error instanceof SprintConflictError) {
+    return respondJson(response, 409, {
+      error: { code: error.code, message: error.message, detail: null },
+      active: error.active,
+      // The files, so a person can go and fix one of them.
+      paths: error.paths,
+    });
+  }
+  if (error instanceof SprintStateError) {
+    return respondJson(response, 409, {
+      error: { code: error.code, message: error.message, detail: null },
+      status: error.status,
+      active: error.active,
+    });
+  }
   if (error instanceof SprintNotEmptyError) {
     return respondJson(response, 409, {
       error: { code: error.code, message: error.message, detail: null },
@@ -1127,6 +1156,62 @@ async function rankRoute(
         "The region could not be rebalanced. Reload the list and try again.",
       );
     }
+    return handleWriteError(error, response);
+  }
+}
+
+async function startSprintRoute(
+  id: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  try {
+    const result = await startSprint(context.writable, id, actorOf(context));
+    respondJson(response, 200, {
+      sprint: result.sprint.resource,
+      plan: result.plan,
+      // Advisory. Exceeding capacity has never blocked anything (PRD R6, AC5),
+      // and the caller gets told so it can say so rather than discover it.
+      warning: result.warning,
+    });
+  } catch (error) {
+    return handleWriteError(error, response);
+  }
+}
+
+async function closeSprintRoute(
+  id: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  const carry = body.carry_over as { to?: unknown } | undefined;
+
+  try {
+    const result = await closeSprint(
+      context.writable,
+      id,
+      carry === undefined
+        ? {}
+        : { carryOver: { to: typeof carry.to === "string" ? carry.to : null } },
+      actorOf(context),
+    );
+
+    // Asked without a choice, this is a question rather than a command: the
+    // sprint is untouched and the answer says what closing would move.
+    respondJson(response, 200, {
+      pending: result.pending,
+      status: result.sprint.status,
+      unfinished: result.unfinished,
+      // Kept apart from unfinished so "we finished it" and "we decided not to"
+      // do not read as the same outcome (S1-D5).
+      cancelled: result.cancelled,
+      ...(result.pending
+        ? { strategies: ["carry_over.to = <sprint id>", "carry_over.to = null"] }
+        : { carriedTo: result.carriedTo ?? null }),
+    });
+  } catch (error) {
     return handleWriteError(error, response);
   }
 }
