@@ -15,7 +15,7 @@
  * Bumping SCHEMA_VERSION discards the index and rebuilds from files. That is
  * always safe: nothing here is a source of truth.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const INDEX_SCHEMA = `
 CREATE TABLE file_state (
@@ -217,8 +217,17 @@ CREATE TABLE index_meta (
   v TEXT NOT NULL
 );
 
+-- S2-D2 (2026-07-29): trigram, decided by measurement on 5,000 Korean issues.
+-- unicode61 splits on whitespace, and Korean attaches particles to the word
+-- itself — 스크롤을, 스크롤에서, 스크롤로 are three different tokens. Searching
+-- 스크롤 found 2,323 of 4,986 matches: not slower, wrong. Trigram found all of
+-- them, cost 1.8x the index (4.2MB → 7.7MB at 5,000 issues, against the 3–5x
+-- the design feared) and answered in 0.15ms against a 300ms budget.
+--
+-- Trigram cannot match a term shorter than three characters — it returns no
+-- rows rather than an error — so the query layer falls back to LIKE there.
 CREATE VIRTUAL TABLE issues_fts USING fts5(
-  uid UNINDEXED, title, body, key_alias,
-  tokenize='unicode61 remove_diacritics 2'
+  uid UNINDEXED, title, body, key_alias, acceptance,
+  tokenize='trigram'
 );
 `;

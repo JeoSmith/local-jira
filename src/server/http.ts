@@ -576,6 +576,7 @@ function listIssuesRoute(
     );
   }
 
+  const query = url.searchParams.get("q");
   const cursor = url.searchParams.get("after");
   const page = listIssues(context.board, {
     project: url.searchParams.get("project") ?? undefined,
@@ -584,6 +585,9 @@ function listIssuesRoute(
     assignee: many("assignee"),
     label: many("label"),
     sprint,
+    // Blank means "no search", not a bad request: a cleared search box should
+    // show the list again rather than an error.
+    q: url.searchParams.get("q") ?? undefined,
     claimable: claimable === "true" ? true : undefined,
     limit: url.searchParams.has("limit")
       ? Number(url.searchParams.get("limit"))
@@ -604,6 +608,17 @@ function listIssuesRoute(
     })),
     hasMore: page.hasMore,
     nextAfter: page.nextAfter === null ? null : encodeCursor(page.nextAfter),
+    // Where each result matched, so a person can see why it came back rather
+    // than guessing which of title, body or an old key was the reason. Spread
+    // rather than set to undefined: the response is canonical JSON, which has
+    // no way to represent an absent value and refuses one.
+    ...(query === null || query.trim() === ""
+      ? {}
+      : {
+          matches: Object.fromEntries(
+            issues.map((issue) => [issue.key, matchedFields(context.board, issue.uid, query)]),
+          ),
+        }),
     // The selection total a backlog screen shows (§8) — of this page, which is
     // what the screen actually holds.
     points: issues.reduce((total, issue) => total + (issue.points ?? 0), 0),
@@ -1204,6 +1219,56 @@ function linksRoute(
  * Opaque to the caller so it cannot be built by hand and quietly become an
  * offset, which is the thing this exists to avoid.
  */
+/**
+ * Which fields a query hit, and a snippet from the body when it hit there.
+ *
+ * Computed per result rather than joined into the list query: the list is a
+ * page of at most 500 and this keeps the search out of the ordering path,
+ * where it would have to be reasoned about alongside the rank tie-break.
+ */
+function matchedFields(
+  board: BoardHandle,
+  uid: string,
+  query: string,
+): { fields: string[]; snippet: string | null } {
+  const terms = query.trim().split(/\s+/).filter((term) => term !== "");
+  const row = board.db
+    .prepare("SELECT title, body, key_alias, acceptance FROM issues_fts WHERE uid = ?")
+    .get(uid) as
+    | { title: string; body: string; key_alias: string; acceptance: string }
+    | undefined;
+
+  if (!row) {
+    return { fields: [], snippet: null };
+  }
+
+  const fields: string[] = [];
+  const named: Array<[string, string]> = [
+    ["title", row.title],
+    ["body", row.body],
+    ["acceptance", row.acceptance],
+    ["key_alias", row.key_alias],
+  ];
+  for (const [name, value] of named) {
+    if (terms.some((term) => value.toLowerCase().includes(term.toLowerCase()))) {
+      fields.push(name);
+    }
+  }
+
+  let snippet: string | null = null;
+  const hit = terms.find((term) => row.body.toLowerCase().includes(term.toLowerCase()));
+  if (hit) {
+    const at = row.body.toLowerCase().indexOf(hit.toLowerCase());
+    const from = Math.max(0, at - 40);
+    snippet =
+      (from > 0 ? "…" : "") +
+      row.body.slice(from, at + hit.length + 40).replace(/\s+/g, " ").trim() +
+      (at + hit.length + 40 < row.body.length ? "…" : "");
+  }
+
+  return { fields, snippet };
+}
+
 function encodeCursor(after: { rank: string | null; uid: string }): string {
   return Buffer.from(`${after.rank ?? ""}\u0000${after.uid}`, "utf8").toString("base64url");
 }
