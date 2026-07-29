@@ -258,6 +258,35 @@ export function patchLinks(original: string, links: Link[]): string {
   return `${match[1]}${lines.join("\n")}${match[3]}${match[4]}`;
 }
 
+/**
+ * Moves an issue to a new display key, keeping the old one as an alias.
+ *
+ * Only this file changes. `parent`, `links` and every event reference the uid,
+ * which does not move — the display key is held by people's memory and by
+ * commit trailers, and that is exactly what `former_keys` is for (§3.8).
+ */
+export function patchRekey(original: string, from: string, to: string): string {
+  const match = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n)([\s\S]*)$/.exec(original);
+  if (!match) {
+    throw new IssueError("E_INVALID_TITLE", "The issue file has no frontmatter");
+  }
+
+  let lines = setScalar(match[2].split("\n"), "key", to);
+
+  const index = indexOfKey(lines, "former_keys");
+  const existing = index === -1
+    ? []
+    : (lines[index].slice(lines[index].indexOf(":") + 1).trim().replace(/^\[|\]$/g, "")
+        .split(",").map((entry) => entry.trim()).filter((entry) => entry !== ""));
+
+  if (!existing.includes(from)) {
+    existing.push(from);
+  }
+  lines = setScalar(lines, "former_keys", `[${existing.join(", ")}]`);
+
+  return `${match[1]}${lines.join("\n")}${match[3]}${match[4]}`;
+}
+
 /** Sets one of the two rank fields, leaving the other alone (ADR-005 §1). */
 export function patchRank(original: string, field: string, rank: string): string {
   const match = /^(---\r?\n)([\s\S]*?)(\r?\n---\r?\n)([\s\S]*)$/.exec(original);

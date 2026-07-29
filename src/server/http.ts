@@ -413,6 +413,34 @@ async function handle(
     }
     return showIssueRoute(rest, response, authed);
   }
+  if (route === "GET /rekeys") {
+    return guard(response, authed, "issue:read", () => {
+      // Read from the event log rather than a table: a rekey is a thing that
+      // happened, and the events are the record of what happened (§5.3).
+      const rows = authed.board.db
+        .prepare(
+          `SELECT at, target_uid, before_json, after_json, detail_json FROM events
+            WHERE verb = 'issue.rekeyed' ORDER BY at DESC, event_id DESC LIMIT 200`,
+        )
+        .all() as Array<{
+        at: string;
+        target_uid: string;
+        before_json: string | null;
+        after_json: string | null;
+        detail_json: string | null;
+      }>;
+
+      respondJson(response, 200, {
+        rekeys: rows.map((row) => ({
+          at: row.at,
+          uid: row.target_uid,
+          from: JSON.parse(row.before_json ?? "{}").key ?? null,
+          to: JSON.parse(row.after_json ?? "{}").key ?? null,
+          reason: JSON.parse(row.detail_json ?? "{}").reason ?? null,
+        })),
+      });
+    });
+  }
   if (route === "GET /index") {
     return guard(response, authed, "issue:read", () => {
       respondJson(response, 200, indexReport(authed));
