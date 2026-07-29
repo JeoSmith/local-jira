@@ -495,6 +495,13 @@ export function clearFile(db: DatabaseSync, identity: FileIdentity): void {
     case "event":
       db.prepare("DELETE FROM events WHERE source_path = ?").run(identity.path);
       break;
+    // Not `WHERE path = ?` like the rest: the users table has no path because
+    // one file holds every row. Clearing all of them is what makes the reload
+    // below a replacement, so a user dropped from the file loses their row —
+    // and their role — instead of surviving until the next full rebuild.
+    case "users":
+      db.prepare("DELETE FROM users").run();
+      break;
     default:
       break;
   }

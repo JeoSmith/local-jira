@@ -691,6 +691,7 @@ const RECOVERY = {
   frontmatter_missing: "파일 맨 앞의 `---` 블록이 없습니다.",
   reserved_field: "예약된 필드 이름을 썼습니다. 다른 이름으로 바꾸세요.",
   encoding: "UTF-8로 읽을 수 없는 바이트가 있습니다.",
+  schema_invalid: "YAML 문법은 맞지만 파일 구조가 맞지 않습니다. 필요한 항목이 빠졌는지 확인하세요.",
 };
 
 const REASON_LABELS = {
@@ -703,6 +704,7 @@ const REASON_LABELS = {
   frontmatter_missing: "frontmatter 없음",
   reserved_field: "예약어 사용",
   encoding: "인코딩 오류",
+  schema_invalid: "구조 오류",
 };
 
 const GIT_KIND_LABELS = { added: "추가", modified: "수정", deleted: "삭제", renamed: "이름변경" };
