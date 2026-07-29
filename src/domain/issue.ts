@@ -46,7 +46,8 @@ export type IssueErrorCode =
   | "E_INVALID_INSTANT"
   | "E_SPRINT_NOT_DELETABLE"
   | "E_UNKNOWN_SPRINT"
-  | "E_SPRINT_CLOSED";
+  | "E_SPRINT_CLOSED"
+  | "E_INVALID_CARRY_OVER";
 
 export class IssueError extends Error {
   readonly code: IssueErrorCode;

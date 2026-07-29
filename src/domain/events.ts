@@ -24,6 +24,8 @@ export const VERBS = [
   "run.ended",
   "sprint.created",
   "sprint.updated",
+  "sprint.started",
+  "sprint.closed",
   "sprint.deleted",
   "user.created",
   "user.role_changed",

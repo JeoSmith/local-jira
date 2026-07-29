@@ -421,6 +421,294 @@ export function planOf(board: BoardHandle, id: string): SprintPlan | null {
   };
 }
 
+/** Terminal states. Work here is not carried into the next sprint. */
+const SETTLED = new Set(["DONE", "CANCELLED"]);
+
+export class SprintConflictError extends Error {
+  readonly code = "E_SPRINT_CONFLICT";
+  readonly active: string[];
+  readonly paths: string[];
+
+  constructor(project: string, active: string[], paths: string[]) {
+    super(`${project} has ${active.length} active sprints and cannot start or close one.`);
+    this.name = "SprintConflictError";
+    this.active = active;
+    this.paths = paths;
+  }
+}
+
+export class SprintStateError extends Error {
+  readonly code = "E_SPRINT_STATE";
+  readonly status: string | null;
+  readonly active: string | null;
+
+  constructor(message: string, status: string | null, active: string | null = null) {
+    super(message);
+    this.name = "SprintStateError";
+    this.status = status;
+    this.active = active;
+  }
+}
+
+/**
+ * Refuses to act while the project disagrees with itself about what is active.
+ *
+ * A merge can leave two ACTIVE sprints; r11a detects that and reports it, but
+ * has no command to block. This is the command. Starting or closing from an
+ * ambiguous state would pick one of the two on the team's behalf, and which one
+ * is exactly what nobody has decided yet (§5.6).
+ */
+function refuseWhileConflicted(board: BoardHandle, project: string): void {
+  const rows = board.db
+    .prepare(
+      "SELECT id, path FROM sprints WHERE project = ? AND status = 'ACTIVE' AND state = 'OK'",
+    )
+    .all(project) as Array<{ id: string; path: string }>;
+
+  if (rows.length > 1) {
+    throw new SprintConflictError(
+      project,
+      rows.map((row) => row.id),
+      rows.map((row) => row.path),
+    );
+  }
+}
+
+export interface StartResult {
+  sprint: SprintDetail;
+  plan: SprintPlan;
+  /** Present when the scope is past capacity. Advisory only (PRD R6, AC5). */
+  warning: string | null;
+}
+
+export async function startSprint(
+  writable: WritableBoard,
+  id: string,
+  actor: Actor,
+): Promise<StartResult> {
+  const board = writable.board;
+  const sprint = requireSprint(board, id);
+  refuseWhileConflicted(board, sprint.project);
+
+  if (sprint.status !== "PLANNED") {
+    throw new SprintStateError(
+      `${id} is ${sprint.status} and cannot be started.`,
+      sprint.status,
+    );
+  }
+
+  const active = board.db
+    .prepare(
+      "SELECT id FROM sprints WHERE project = ? AND status = 'ACTIVE' AND state = 'OK' LIMIT 1",
+    )
+    .get(sprint.project) as { id: string } | undefined;
+
+  if (active) {
+    // §5.2: one active sprint per project. Told which one, so the caller can
+    // close it rather than guess why the request failed.
+    throw new SprintStateError(
+      `${sprint.project} already has an active sprint.`,
+      sprint.status,
+      active.id,
+    );
+  }
+
+  await writeStatus(writable, sprint, "ACTIVE", actor, {});
+
+  const started = requireSprint(board, id);
+  const plan = planOf(board, id);
+  return {
+    sprint: started,
+    plan: plan as SprintPlan,
+    warning:
+      plan && plan.over !== null && plan.over > 0
+        ? `capacity ${plan.capacity} 대비 ${plan.committed} 포인트(+${plan.over}) 초과`
+        : null,
+  };
+}
+
+export interface CloseRequest {
+  /** Absent means "tell me what would happen"; the sprint stays open. */
+  carryOver?: { to: string | null };
+}
+
+export interface CloseResult {
+  /** True when nothing was changed because no carry-over choice was made. */
+  pending: boolean;
+  sprint: SprintDetail;
+  unfinished: string[];
+  /** Cancelled issues, listed apart so "resolved" and "abandoned" stay distinct. */
+  cancelled: string[];
+  carriedTo?: string | null;
+}
+
+/**
+ * Closes an active sprint, moving whatever is unfinished.
+ *
+ * Called without a choice it changes nothing and answers with what it would
+ * move. Closing is where a sprint's leftovers get decided, and deciding that
+ * silently — pushing everything forward, or dropping it into the backlog —
+ * makes the tool responsible for a judgement the team should make.
+ *
+ * `CANCELLED` counts as finished. The work will not happen, so carrying it
+ * would move a decision not to do something into next sprint's scope. It is
+ * still reported separately, for the same reason S1-D5 distinguishes a blocker
+ * that finished from one that was abandoned.
+ */
+export async function closeSprint(
+  writable: WritableBoard,
+  id: string,
+  request: CloseRequest,
+  actor: Actor,
+): Promise<CloseResult> {
+  const board = writable.board;
+  const sprint = requireSprint(board, id);
+  refuseWhileConflicted(board, sprint.project);
+
+  if (sprint.status !== "ACTIVE") {
+    throw new SprintStateError(`${id} is ${sprint.status} and cannot be closed.`, sprint.status);
+  }
+
+  const held = board.db
+    .prepare(
+      "SELECT key, status FROM issues WHERE sprint_id = ? AND state = 'OK' ORDER BY key",
+    )
+    .all(id) as Array<{ key: string; status: string | null }>;
+
+  const unfinished = held
+    .filter((row) => row.status === null || !SETTLED.has(row.status))
+    .map((row) => row.key);
+  const cancelled = held.filter((row) => row.status === "CANCELLED").map((row) => row.key);
+
+  if (request.carryOver === undefined) {
+    return { pending: true, sprint, unfinished, cancelled };
+  }
+
+  const target = request.carryOver.to;
+  if (target !== null) {
+    if (target === id) {
+      throw new IssueError("E_INVALID_CARRY_OVER", "A sprint cannot carry work into itself.");
+    }
+    const destination = findSprint(board, target);
+    if (destination === null) {
+      throw new IssueError("E_UNKNOWN_SPRINT", `No sprint with id ${target} to carry work into.`);
+    }
+    if (destination.status === "CLOSED") {
+      throw new IssueError(
+        "E_SPRINT_CLOSED",
+        `${target} is closed and cannot receive carried-over work.`,
+      );
+    }
+  }
+
+  // Issues first. Stopping partway leaves a sprint that is still ACTIVE and
+  // still holds them, which the next attempt resolves; closing first would
+  // leave work attached to a finished sprint.
+  for (const key of unfinished) {
+    await moveIssueSprint(writable, key, target, actor, id);
+  }
+
+  await writeStatus(writable, sprint, "CLOSED", actor, {
+    carried: unfinished.length,
+    carried_to: target,
+  });
+
+  return {
+    pending: false,
+    sprint: requireSprint(board, id),
+    unfinished,
+    cancelled,
+    carriedTo: target,
+  };
+}
+
+function requireSprint(board: BoardHandle, id: string): SprintDetail {
+  const sprint = findSprint(board, id);
+  if (sprint === null) {
+    throw new IssueError("E_UNKNOWN_PROJECT", `No sprint with id ${id}`);
+  }
+  return sprint;
+}
+
+async function writeStatus(
+  writable: WritableBoard,
+  sprint: SprintDetail,
+  status: SprintStatus,
+  actor: Actor,
+  detail: Record<string, JsonValue>,
+): Promise<void> {
+  const board = writable.board;
+  const absolute = path.join(board.boardRoot, sprint.path);
+  const original = fs.readFileSync(absolute, "utf8");
+  const patched = original.replace(/^status: .*$/m, `status: ${status}`);
+
+  const now = timestamp(projectTimezone(board, sprint.project));
+  await writable.writer.write({
+    kind: "update",
+    targetPath: sprint.path,
+    contents: patched,
+    expectedHash: fileHash(Buffer.from(original, "utf8")),
+    event: buildEvent(board.localDirectory, {
+      verb: status === "ACTIVE" ? "sprint.started" : "sprint.closed",
+      targetKind: "sprint",
+      targetUid: sprint.id,
+      actor: { id: actor.id, kind: actor.kind },
+      before: { status: sprint.status },
+      after: { status },
+      detail: { project: sprint.project, ...detail },
+      at: now,
+    }),
+    actorId: actor.id,
+    actorKind: actor.kind,
+  });
+}
+
+/** Repoints one issue's sprint, leaving its backlog position alone. */
+async function moveIssueSprint(
+  writable: WritableBoard,
+  key: string,
+  to: string | null,
+  actor: Actor,
+  from: string,
+): Promise<void> {
+  const board = writable.board;
+  const row = board.db
+    .prepare("SELECT path, uid FROM issues WHERE key = ? AND state = 'OK'")
+    .get(key) as { path: string; uid: string } | undefined;
+  if (!row) {
+    return;
+  }
+
+  const absolute = path.join(board.boardRoot, row.path);
+  const original = fs.readFileSync(absolute, "utf8");
+  const patched = to === null
+    ? original.replace(/^sprint: .*\n/m, "")
+    : original.replace(/^sprint: .*$/m, `sprint: ${to}`);
+  if (patched === original) {
+    return;
+  }
+
+  const now = timestamp(projectTimezone(board, key.split("-")[0]));
+  await writable.writer.write({
+    kind: "update",
+    targetPath: row.path,
+    contents: patched,
+    expectedHash: fileHash(Buffer.from(original, "utf8")),
+    event: buildEvent(board.localDirectory, {
+      verb: "issue.updated",
+      targetKind: "issue",
+      targetUid: row.uid,
+      actor: { id: actor.id, kind: actor.kind },
+      before: { sprint: from },
+      after: { sprint: to },
+      detail: { key, reason: "sprint_closed" },
+      at: now,
+    }),
+    actorId: actor.id,
+    actorKind: actor.kind,
+  });
+}
+
 // ── rendering and validation ────────────────────────────────────────────────
 
 interface RenderInput {
