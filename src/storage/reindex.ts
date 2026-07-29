@@ -11,6 +11,7 @@ import {
 } from "./index-db.ts";
 import { classify, isExcluded, toBoardPath, type FileIdentity } from "./layout.ts";
 import { buildRecords, isParseError } from "./records.ts";
+import { validateBoard } from "./integrity.ts";
 import { fileHash } from "./resource.ts";
 
 export interface ScannedFile {
@@ -243,6 +244,7 @@ export function rebuildIndex(
         }
       }
     }
+    validateBoard(built);
     setMeta(built, "last_full_rebuild_at", String(Date.now()));
     built.exec("COMMIT");
   } catch (error) {
@@ -320,7 +322,6 @@ export function incrementalSync(
           continue;
         }
 
-        clearFile(db, file.identity);
         (stats.changed ??= []).push(file.identity.path);
         if (loadScannedFile(db, file, bytes, hash, stats)) {
           stats.parsed += 1;
@@ -347,6 +348,10 @@ export function incrementalSync(
       reviveMoved(db, relative, now);
     }
 
+    // Stage B last: whether a reference dangles or a uid repeats is a property
+    // of the whole set, and only now is the whole set loaded.
+    validateBoard(db, now);
+
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
@@ -367,25 +372,46 @@ export function loadScannedFile(
   let uid: string | null = null;
   let ok = true;
 
+  // What the index held before this attempt. Kept because a file that stops
+  // parsing must leave its record behind, quarantined: deleting it would take
+  // the history with it, and the error report could not say what the last good
+  // version was (§5.6).
+  const previous = db
+    .prepare("SELECT uid, file_hash FROM file_state WHERE path = ?")
+    .get(file.identity.path) as { uid: string | null; file_hash: string } | undefined;
+
   try {
+    // `parseMarkdownResource` refuses a conflicted file before it parses one,
+    // reporting `conflict_marker` and the line — so there is nothing to check
+    // for here beyond letting that error through.
     const records = buildRecords(file.identity, bytes);
+    // Cleared only now that the replacement is known to be good. Clearing first
+    // and then failing to parse is what used to delete the record outright.
+    clearFile(db, file.identity);
     records.apply(db);
     uid = records.uid;
   } catch (error) {
     ok = false;
     stats.failed += 1;
+    uid = previous?.uid ?? null;
+
+    if (file.identity.kind === "issue") {
+      quarantineExisting(db, file.identity.path, previous?.uid ?? null);
+    }
     db.prepare(
-      `INSERT INTO index_errors(path, uid, project, stage, reason, detail, detected_at)
-       VALUES(?,?,?,'A',?,?,?)
+      `INSERT INTO index_errors(path, uid, project, stage, reason, detail, last_good_hash, detected_at)
+       VALUES(?,?,?,'A',?,?,?,?)
        ON CONFLICT(path) DO UPDATE SET reason = excluded.reason,
                                        detail = excluded.detail,
+                                       last_good_hash = excluded.last_good_hash,
                                        detected_at = excluded.detected_at`,
     ).run(
       file.identity.path,
-      null,
+      previous?.uid ?? null,
       file.identity.project,
       isParseError(error) ? error.reason : "unexpected",
       error instanceof Error ? error.message : String(error),
+      previous?.file_hash ?? null,
       Date.now(),
     );
   }
@@ -408,6 +434,20 @@ export function loadScannedFile(
   );
 
   return ok;
+}
+
+/**
+ * Hides the record a file used to have, rather than losing it.
+ *
+ * The row survives so the entity keeps its history and so the error report can
+ * name the last good content hash. Search is cleared, because a quarantined
+ * issue must not surface in results.
+ */
+function quarantineExisting(db: DatabaseSync, path: string, uid: string | null): void {
+  db.prepare("UPDATE issues SET state = 'INVALID' WHERE path = ?").run(path);
+  if (uid !== null) {
+    db.prepare("DELETE FROM issues_fts WHERE uid = ?").run(uid);
+  }
 }
 
 /** Removes everything a file contributed, so a reload cannot leave residue. */
@@ -482,8 +522,6 @@ export function syncPath(
     retirePath(db, relativePath, identity, { now: Date.now(), graceMs: DELETE_GRACE_MS });
     return;
   }
-
-  clearFile(db, identity);
 
   const bytes = fs.readFileSync(absolute);
   loadScannedFile(

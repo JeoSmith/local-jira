@@ -3,7 +3,6 @@ import fs from "node:fs";
 
 import { classify } from "./layout.ts";
 import {
-  clearFile,
   DELETE_GRACE_MS,
   loadScannedFile,
   retirePath,
@@ -12,6 +11,7 @@ import {
   LOAD_ORDER,
   type ReindexStats,
 } from "./reindex.ts";
+import { validateBoard, type IntegrityReport } from "./integrity.ts";
 import { fileHash } from "./resource.ts";
 
 /** Why a reconciliation ran. Every run logs one of these (r08c). */
@@ -44,6 +44,8 @@ export interface ReconcileReport {
   confirmed: Tombstoned[];
   failed: number;
   durationMs: number;
+  /** What stage B made of the board once everything was loaded. */
+  integrity?: IntegrityReport;
 }
 
 interface KnownFile {
@@ -122,7 +124,6 @@ export function fullReconcile(
           continue;
         }
 
-        clearFile(db, file.identity);
         loadScannedFile(db, file, bytes, hash, stats);
         report.changed.push(file.identity.path);
       }
@@ -181,6 +182,10 @@ export function fullReconcile(
       db.prepare("UPDATE issues SET delete_deadline_at = NULL WHERE path = ?").run(entry.path);
       report.confirmed.push(entry);
     }
+
+    // 5. Stage B, once the set is whole. A pull is the most likely way to get a
+    //    dangling reference or a duplicate uid in the first place.
+    report.integrity = validateBoard(db, now);
 
     db.exec("COMMIT");
   } catch (error) {

@@ -20,6 +20,7 @@ import {
 import { buildEvent } from "./events.ts";
 import { canHaveChildren, childrenOf, validateParent } from "./hierarchy.ts";
 import { declaredLinks, validateLink, type Link } from "./links.ts";
+import { isQuarantinedUid, quarantineOf } from "../storage/integrity.ts";
 import {
   allowedTargets,
   isStatus,
@@ -110,6 +111,10 @@ export async function updateIssue(
   actor: Actor,
 ): Promise<UpdateResult> {
   const board = writable.board;
+  // Before the not-found check. A quarantined issue is present but hidden, and
+  // answering 404 would send the person hunting for a deletion that never
+  // happened instead of at the file that needs repairing.
+  refuseIfQuarantined(board, key);
   const found = findIssue(board, key);
 
   if (found === null || !("issue" in found)) {
@@ -137,6 +142,7 @@ export async function updateIssue(
 
   if (input.parent !== undefined && input.parent !== null) {
     const type = String((issue.resource as Record<string, unknown>).type ?? "");
+    refuseIfTargetQuarantined(board, input.parent);
     validateParent(board, requireKnownType(type), issue.uid, input.parent);
   }
 
@@ -476,7 +482,11 @@ export async function addLink(
   actor: Actor,
 ): Promise<UpdateResult> {
   const board = writable.board;
+  refuseIfQuarantined(board, key);
   const issue = requireIssue(board, key);
+  // Before validateLink, which only sees state='OK' rows and would call a
+  // quarantined target "not found" — true of the query, false of the board.
+  refuseIfTargetQuarantined(board, input.to);
   const link = validateLink(board, issue.uid, input.kind, input.to);
 
   requirePrecondition(issue, ifMatch, { link: { current: null, requested: link.id } });
@@ -501,6 +511,7 @@ export async function removeLink(
   actor: Actor,
 ): Promise<UpdateResult> {
   const board = writable.board;
+  refuseIfQuarantined(board, key);
   const issue = requireIssue(board, key);
 
   const existing = declaredLinks(issue.resource);
@@ -560,6 +571,48 @@ async function applyLinks(
   });
 
   return { issue: requireIssue(board, issue.key), changed: true };
+}
+
+export class QuarantinedError extends Error {
+  readonly code = "E_ISSUE_QUARANTINED";
+  readonly reason: string;
+  readonly path: string;
+  readonly recovery: string | null;
+
+  constructor(key: string, record: { reason: string; path: string; detail: string | null }) {
+    super(`${key} is quarantined (${record.reason}) and cannot be changed until it is repaired.`);
+    this.name = "QuarantinedError";
+    this.reason = record.reason;
+    this.path = record.path;
+    this.recovery = record.detail;
+  }
+}
+
+/**
+ * Refuses to change an entity the board has quarantined.
+ *
+ * Writing to it would build on a state nobody has vouched for, and the next
+ * reconcile could quarantine the result too. Repair happens in the file — the
+ * error says which file and what is wrong with it (§5.6).
+ */
+export function refuseIfQuarantined(board: WritableBoard["board"], key: string): void {
+  const record = quarantineOf(board.db, key);
+  if (record !== null) {
+    throw new QuarantinedError(key, record);
+  }
+}
+
+/** The same refusal for an entity named as a link target or a parent. */
+export function refuseIfTargetQuarantined(
+  board: WritableBoard["board"],
+  uid: string,
+): void {
+  if (isQuarantinedUid(board.db, uid)) {
+    const row = board.db
+      .prepare("SELECT key FROM issues WHERE uid = ? LIMIT 1")
+      .get(uid) as { key: string } | undefined;
+    refuseIfQuarantined(board, row?.key ?? uid);
+  }
 }
 
 function requireIssue(board: WritableBoard["board"], key: string): IssueDetail {
@@ -628,6 +681,7 @@ export async function transitionIssue(
   role: string,
 ): Promise<UpdateResult> {
   const board = writable.board;
+  refuseIfQuarantined(board, key);
   const found = findIssue(board, key);
   if (found === null || !("issue" in found)) {
     throw new IssueError("E_UNKNOWN_PROJECT", `No issue with key ${key}`);
@@ -752,6 +806,7 @@ export async function deleteIssue(
   strategy: DeleteStrategy | null = null,
 ): Promise<void> {
   const board = writable.board;
+  refuseIfQuarantined(board, key);
   const found = findIssue(board, key);
   if (found === null || !("issue" in found)) {
     throw new IssueError("E_UNKNOWN_PROJECT", `No issue with key ${key}`);

@@ -9,6 +9,7 @@ import { issuePath } from "../storage/layout.ts";
 import { buildEvent } from "./events.ts";
 import { validateParent } from "./hierarchy.ts";
 import { between } from "./rank.ts";
+import { refuseIfTargetQuarantined } from "./update.ts";
 
 export const ISSUE_TYPES = [
   "epic",
@@ -106,7 +107,8 @@ export async function createIssue(
   const parent =
     input.parent === undefined || input.parent === null
       ? null
-      : validateParent(board, type, null, input.parent);
+      : (refuseIfTargetQuarantined(board, input.parent),
+         validateParent(board, type, null, input.parent));
 
   const uid = createUlid();
   const key = allocateKey(board, project.key);

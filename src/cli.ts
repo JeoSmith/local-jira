@@ -226,9 +226,12 @@ async function runIssueCommand(args: string[]): Promise<void> {
     );
     const board = openBoard(process.cwd());
     try {
-      const issues = listIssues(board, {
+      const status = options.values.get("--status");
+      const { issues } = listIssues(board, {
         project: options.values.get("--project"),
-        status: options.values.get("--status"),
+        // Comma-separated so one flag can name alternatives, matching the API
+        // where a repeated parameter means "any of these".
+        status: status === undefined ? undefined : status.split(",").map((v) => v.trim()),
         limit: options.values.has("--limit")
           ? Number(options.values.get("--limit"))
           : undefined,

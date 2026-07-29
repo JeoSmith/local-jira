@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { AuthorizationError, require as requireCapability, type Capability } from "../auth/authorize.ts";
 import { CredentialStore } from "../auth/credentials.ts";
-import { createIssue, IssueError } from "../domain/issue.ts";
+import { createIssue, ISSUE_TYPES, IssueError } from "../domain/issue.ts";
 import {
   addLink,
   ChildrenPresentError,
@@ -15,6 +15,7 @@ import {
   IMMUTABLE_FIELDS,
   PreconditionFailedError,
   PreconditionRequiredError,
+  QuarantinedError,
   transitionIssue,
   TransitionError,
   updateIssue,
@@ -31,6 +32,7 @@ import {
   type UserRecord,
 } from "../domain/users.ts";
 import { buildEvent, redact } from "../domain/events.ts";
+import { STATUSES } from "../domain/transition.ts";
 import { activityOf, lastActorKinds } from "../domain/activity.ts";
 import { childrenOf } from "../domain/hierarchy.ts";
 import { claimability, relatedTo } from "../domain/links.ts";
@@ -50,6 +52,7 @@ import {
   type WritableBoard,
 } from "../storage/board.ts";
 import { reconcileExternal, reconcileFull } from "../storage/external.ts";
+import { boardHealth, quarantineList } from "../storage/integrity.ts";
 import { findTombstone, type ReconcileReason } from "../storage/reconcile.ts";
 import { watchBoard, type BoardWatcher } from "../storage/watcher.ts";
 import { formatEtag } from "../storage/resource.ts";
@@ -337,6 +340,19 @@ async function handle(
     }
     return showIssueRoute(rest, response, authed);
   }
+  if (route === "GET /integrity/issues") {
+    return guard(response, authed, "issue:read", () => {
+      const health = boardHealth(authed.board.db);
+      respondJson(response, 200, {
+        quarantined: quarantineList(authed.board.db),
+        // Not quarantined, but the board cannot act on them either: two active
+        // sprints is a rule violation no merge can settle, and duplicate ranks
+        // sort fine but want rebalancing (ADR-005 §1).
+        sprintConflicts: health.sprintConflicts,
+        duplicateRankRegions: health.duplicateRanks,
+      });
+    });
+  }
 
   respondError(response, 404, "E_NOT_FOUND", `No route for ${route}`);
 }
@@ -401,13 +417,69 @@ function listIssuesRoute(
   response: http.ServerResponse,
   context: RequestContext,
 ): void {
-  const issues = listIssues(context.board, {
+  const many = (name: string): string[] | undefined => {
+    const values = url.searchParams.getAll(name).flatMap((value) => value.split(","));
+    const cleaned = values.map((value) => value.trim()).filter((value) => value !== "");
+    return cleaned.length > 0 ? cleaned : undefined;
+  };
+
+  const status = many("status");
+  const type = many("type");
+  const sprint = many("sprint");
+
+  // Rejected rather than quietly matched against nothing. `sprint=active` is
+  // the form §4 S3 uses, and answering it with an empty list would read as
+  // "no work available" instead of "sprints do not exist yet" (r05, M2).
+  if (sprint?.includes("active")) {
+    return respondError(
+      response, 400, "E_FILTER_UNSUPPORTED",
+      "sprint=active is not available yet.",
+      "Sprint entities arrive with r05 (M2). Filter by a sprint id in the meantime.",
+    );
+  }
+
+  const badStatus = status?.filter((value) => !STATUSES.includes(value.toUpperCase() as never));
+  if (badStatus && badStatus.length > 0) {
+    return respondError(
+      response, 400, "E_INVALID_FILTER",
+      `Not a status: ${badStatus.join(", ")}.`,
+      `Allowed: ${STATUSES.join(", ")}.`,
+    );
+  }
+
+  const badType = type?.filter((value) => !ISSUE_TYPES.includes(value.toLowerCase() as never));
+  if (badType && badType.length > 0) {
+    return respondError(
+      response, 400, "E_INVALID_FILTER",
+      `Not an issue type: ${badType.join(", ")}.`,
+      `Allowed: ${ISSUE_TYPES.join(", ")}.`,
+    );
+  }
+
+  const claimable = url.searchParams.get("claimable");
+  if (claimable !== null && claimable !== "true" && claimable !== "false") {
+    return respondError(
+      response, 400, "E_INVALID_FILTER",
+      `claimable must be true or false, not "${claimable}".`,
+    );
+  }
+
+  const cursor = url.searchParams.get("after");
+  const page = listIssues(context.board, {
     project: url.searchParams.get("project") ?? undefined,
-    status: url.searchParams.get("status") ?? undefined,
+    status,
+    type,
+    assignee: many("assignee"),
+    label: many("label"),
+    sprint,
+    claimable: claimable === "true" ? true : undefined,
     limit: url.searchParams.has("limit")
       ? Number(url.searchParams.get("limit"))
       : undefined,
+    after: parseCursor(cursor),
   });
+  const issues = page.issues;
+
   // The badge shows who touched a card last, which is not the same as who
   // created it: without this an agent's change is indistinguishable from the
   // human creation underneath it (§5.1, §8).
@@ -418,6 +490,11 @@ function listIssuesRoute(
       created_by_kind: createdByKind,
       last_actor_kind: kinds.get(issue.uid) ?? null,
     })),
+    hasMore: page.hasMore,
+    nextAfter: page.nextAfter === null ? null : encodeCursor(page.nextAfter),
+    // The selection total a backlog screen shows (§8) — of this page, which is
+    // what the screen actually holds.
+    points: issues.reduce((total, issue) => total + (issue.points ?? 0), 0),
   });
 }
 
@@ -742,6 +819,15 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
       conflicts: error.conflicts,
     });
   }
+  if (error instanceof QuarantinedError) {
+    // 409 rather than 423: the entity is not locked by anybody, it is in a
+    // state the board cannot vouch for, and the fix is in the file.
+    return respondJson(response, 409, {
+      error: { code: error.code, message: error.message, detail: error.recovery },
+      reason: error.reason,
+      path: error.path,
+    });
+  }
   if (error instanceof ChildrenPresentError) {
     // The caller has to choose, so the response carries everything the choice
     // needs: which children, and what the options are called.
@@ -892,6 +978,24 @@ function linksRoute(
     links: relatedTo(context.board, found.issue.uid),
     ...claimability(context.board, found.issue.uid),
   });
+}
+
+/**
+ * The cursor is the sort key itself, encoded.
+ *
+ * Opaque to the caller so it cannot be built by hand and quietly become an
+ * offset, which is the thing this exists to avoid.
+ */
+function encodeCursor(after: { rank: string | null; uid: string }): string {
+  return Buffer.from(`${after.rank ?? ""}\u0000${after.uid}`, "utf8").toString("base64url");
+}
+
+function parseCursor(value: string | null): { rank: string | null; uid: string } | null {
+  if (value === null || value === "") {
+    return null;
+  }
+  const [rank, uid] = Buffer.from(value, "base64url").toString("utf8").split("\u0000");
+  return uid ? { rank: rank === "" ? null : rank, uid } : null;
 }
 
 async function addLinkRoute(
