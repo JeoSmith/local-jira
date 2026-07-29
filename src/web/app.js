@@ -19,7 +19,7 @@ const STATUS_LABELS = {
 };
 
 const state = { issues: [], user: null, source: null, detail: null, integrityOpen: false,
-  view: "board", board: null };
+  view: "board", board: null, dragging: null };
 const $ = (selector) => document.querySelector(selector);
 
 document.addEventListener("DOMContentLoaded", boot);
@@ -65,7 +65,7 @@ async function login(event) {
     const form = new FormData(event.currentTarget);
     const payload = await api("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ id: form.get("id"), password: form.get("password") }),
+      body: { id: form.get("id"), password: form.get("password") },
     });
     showBoard(payload.user);
     await refreshIssues();
@@ -181,6 +181,154 @@ function renderBoard() {
   }
 }
 
+/**
+ * Moving a card, whether by mouse or keyboard.
+ *
+ * Two requests, not one: the transition and the position are separate changes
+ * with separate rules, and folding them into a combined endpoint would make a
+ * third way to change status alongside the transition route. The status goes
+ * first because it is the durable meaning — the transition table governs it and
+ * the event records it — while the position within a column is presentation. If
+ * the rank call fails afterwards the card is in the right column at a
+ * deterministic place, which the next drag corrects; the other order would rank
+ * a card inside a column it is not in yet.
+ */
+async function moveCard(issue, toStatus, before) {
+  const from = issue.status || "BACKLOG";
+
+  // Refused here before it is sent when the table says so, using the list the
+  // server computed. The card should not travel and come back.
+  if (toStatus !== from && !(issue.allowed_to || []).includes(toStatus)) {
+    const target = STATUS_LABELS[toStatus] || toStatus;
+    announce(
+      `${STATUS_LABELS[from] || from}에서 ${target}${josaEuro(target)}는 옮길 수 없습니다.` +
+        ` 가능한 이동: ${(issue.allowed_to || []).map((s) => STATUS_LABELS[s] || s).join(", ") || "없음"}`,
+      true,
+    );
+    return false;
+  }
+
+  try {
+    if (toStatus !== from) {
+      const current = await api(`/issues/${encodeURIComponent(issue.key)}`);
+      await api(`/issues/${encodeURIComponent(issue.key)}/transitions`, {
+        method: "POST",
+        ifMatch: current.__etag,
+        body: { to: toStatus },
+      });
+    }
+    if (before !== undefined) {
+      await api(`/issues/${encodeURIComponent(issue.key)}/rank`, {
+        method: "POST",
+        body: { field: "board_rank", after: before.after, before: before.before },
+      });
+    }
+    const landed = STATUS_LABELS[toStatus] || toStatus;
+    announce(`${issue.key}${josaEul(issue.key)} ${landed}${josaEuro(landed)} 옮겼습니다.`);
+    return true;
+  } catch (error) {
+    announce(moveFailure(error), true);
+    return false;
+  } finally {
+    await refreshIssues();
+  }
+}
+
+/**
+ * The keyboard equivalent of a drag.
+ *
+ * Left and right cross columns, up and down reorder within one. Same rules and
+ * the same refusals as the mouse path — they go through `moveCard`, so there is
+ * one place where a move is decided rather than two that can disagree.
+ */
+async function moveByKeyboard(issue, key) {
+  const columns = (state.board?.columns ?? [])
+    .filter((column) => column.always || column.count > 0)
+    .map((column) => column.status);
+  const here = issue.status || "BACKLOG";
+  const at = columns.indexOf(here);
+
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    const target = columns[at + (key === "ArrowRight" ? 1 : -1)];
+    if (!target) {
+      return void announce("더 이동할 컬럼이 없습니다.", true);
+    }
+    // Land at the end of the target column. Sending "no neighbours either side"
+    // would claim the column is empty, and the server refuses that when it is
+    // not — the position has to describe the list as it actually is.
+    const landing = (state.board?.issues ?? []).filter(
+      (entry) => (entry.status || "BACKLOG") === target && entry.key !== issue.key,
+    );
+    const moved = await moveCard(issue, target, neighboursAt(landing, landing.length, issue.key));
+    if (moved) focusCard(issue.key);
+    return;
+  }
+
+  const column = (state.board?.issues ?? []).filter(
+    (entry) => (entry.status || "BACKLOG") === here,
+  );
+  const index = column.findIndex((entry) => entry.key === issue.key);
+  const to = index + (key === "ArrowDown" ? 1 : -1);
+  if (to < 0 || to >= column.length) {
+    return void announce("더 이동할 자리가 없습니다.", true);
+  }
+
+  const moved = await moveCard(issue, here, neighboursAt(column, to, issue.key));
+  if (moved) focusCard(issue.key);
+}
+
+/** Puts focus back on the card after a re-render, so the keyboard path keeps
+ *  its place. A refused move leaves focus where it was to begin with. */
+function focusCard(key) {
+  requestAnimationFrame(() => {
+    document.querySelector(`.issue-card[data-key="${CSS.escape(key)}"]`)?.focus();
+  });
+}
+
+/**
+ * What to tell the person, in their language.
+ *
+ * The server speaks in codes and English sentences meant for a developer
+ * reading a log. Passing those straight through puts an English exception in
+ * front of somebody who was dragging a card.
+ */
+function moveFailure(error) {
+  const detail = error.payload?.error?.detail;
+  if (error.status === 403) return "권한이 없습니다. 이 이동은 admin만 할 수 있습니다.";
+  if (error.status === 412) return "다른 사람이 먼저 이 이슈를 바꿨습니다. 최신 상태로 다시 그렸습니다.";
+  if (error.code === "E_NEIGHBOURS_MOVED") {
+    return "그 사이 순서가 바뀌었습니다. 다시 그렸으니 한 번 더 시도해 주세요.";
+  }
+  if (error.code === "E_ISSUE_QUARANTINED") {
+    return `이 이슈는 격리 상태입니다. ${error.payload?.path ?? ""} 파일을 고쳐야 변경할 수 있습니다.`;
+  }
+  if (error.code === "E_TRANSITION_NOT_ALLOWED" && Array.isArray(error.payload?.allowed)) {
+    return `허용된 이동: ${error.payload.allowed.map((s) => STATUS_LABELS[s] || s).join(", ")}`;
+  }
+  if (error.status === 409) return detail || "지금은 이 이동을 할 수 없습니다.";
+  if (error.status === 400) return detail || "이 이동은 전이표에 없습니다.";
+  return "옮기지 못했습니다.";
+}
+
+/** Says it out loud for a screen reader, and shows it for everyone else. */
+function announce(message, isError = false) {
+  $("#board-live").textContent = message;
+  const existing = document.querySelector(".board-toast");
+  if (existing) existing.remove();
+  const toast = element("div", `board-toast${isError ? " error" : ""}`, message);
+  document.body.append(toast);
+  setTimeout(() => toast.remove(), isError ? 6000 : 2600);
+}
+
+/** The neighbours a drop lands between, as the rank API wants them. */
+function neighboursAt(columnIssues, index, movingKey) {
+  const rest = columnIssues.filter((issue) => issue.key !== movingKey);
+  return {
+    after: index > 0 ? rest[index - 1]?.uid ?? null : null,
+    before: index < rest.length ? rest[index]?.uid ?? null : null,
+  };
+}
+
 async function switchView(view) {
   if (state.view === view) return;
   state.view = view;
@@ -254,7 +402,72 @@ function renderColumn(status, issues) {
   for (const issue of issues) cards.append(renderCard(issue));
   if (!issues.length) cards.append(element("p", "column-empty", "이슈 없음"));
   column.append(cards);
+
+  // Only the board takes drops. The backlog tab is a different question and
+  // dropping there would have to mean something this story has not defined.
+  if (state.view === "board") makeDropTarget(column, cards, status, issues);
   return column;
+}
+
+function makeDropTarget(column, cards, status, issues) {
+  column.addEventListener("dragover", (event) => {
+    const dragged = state.dragging;
+    if (!dragged) return;
+    const from = dragged.status || "BACKLOG";
+    const allowed = status === from || (dragged.allowed_to || []).includes(status);
+
+    // The cursor says yes or no before the drop, using the table the server
+    // sent. Letting a card be dropped somewhere it cannot go and bouncing it
+    // back is a worse way to say the same thing.
+    event.preventDefault();
+    event.dataTransfer.dropEffect = allowed ? "move" : "none";
+    column.classList.toggle("drop-ok", allowed);
+    column.classList.toggle("drop-no", !allowed);
+    if (allowed) showSlot(cards, event.clientY);
+  });
+
+  for (const type of ["dragleave", "drop"]) {
+    column.addEventListener(type, () => {
+      column.classList.remove("drop-ok", "drop-no");
+      clearSlot();
+    });
+  }
+
+  column.addEventListener("drop", async (event) => {
+    event.preventDefault();
+    const dragged = state.dragging;
+    state.dragging = null;
+    if (!dragged) return;
+
+    const index = slotIndex(cards, event.clientY, dragged.key);
+    await moveCard(dragged, status, neighboursAt(issues, index, dragged.key));
+  });
+}
+
+/** Where a drop at this height would land, as an index into the column. */
+function slotIndex(cards, clientY, movingKey) {
+  const others = [...cards.querySelectorAll(".issue-card")].filter(
+    (node) => node.dataset.key !== movingKey,
+  );
+  for (const [index, node] of others.entries()) {
+    const box = node.getBoundingClientRect();
+    if (clientY < box.top + box.height / 2) return index;
+  }
+  return others.length;
+}
+
+function showSlot(cards, clientY) {
+  clearSlot();
+  const slot = element("div", "card-slot");
+  slot.id = "card-slot";
+  const others = [...cards.querySelectorAll(".issue-card")];
+  const at = slotIndex(cards, clientY, state.dragging?.key);
+  if (at >= others.length) cards.append(slot);
+  else others[at].before(slot);
+}
+
+function clearSlot() {
+  document.querySelector("#card-slot")?.remove();
 }
 
 function renderCard(issue) {
@@ -295,22 +508,70 @@ function renderCard(issue) {
   }
 
   card.tabIndex = 0;
+  card.dataset.key = issue.key;
   card.addEventListener("click", () => void openDetail(issue));
+
+  if (state.view === "board") {
+    card.draggable = true;
+    card.setAttribute("aria-grabbed", "false");
+    card.addEventListener("dragstart", (event) => {
+      state.dragging = issue;
+      card.classList.add("dragging");
+      card.setAttribute("aria-grabbed", "true");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", issue.key);
+    });
+    card.addEventListener("dragend", () => {
+      state.dragging = null;
+      card.classList.remove("dragging");
+      card.setAttribute("aria-grabbed", "false");
+      clearSlot();
+      document.querySelectorAll(".column").forEach((node) =>
+        node.classList.remove("drop-ok", "drop-no"),
+      );
+    });
+  }
+
   card.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      void openDetail(issue);
+      return void openDetail(issue);
+    }
+    // S2-D1: choosing a dependency-free stack means the keyboard path is ours
+    // to write. A board only a mouse can operate is below the bar this project
+    // set for itself in r14b.
+    if (state.view === "board" && event.key.startsWith("Arrow")) {
+      event.preventDefault();
+      void moveByKeyboard(issue, event.key);
     }
   });
   return card;
 }
 
+/** Whether the last syllable ends in a consonant, which is what picks a particle. */
+function endsInConsonant(word) {
+  const last = word.charCodeAt(word.length - 1);
+  if (last >= 0xac00 && last <= 0xd7a3) {
+    const final = (last - 0xac00) % 28;
+    return { closed: final !== 0, rieul: final === 8 };
+  }
+  // Issue keys end in a digit, and Korean reads them: 1 → 일, 2 → 이.
+  const digit = "0123456789".indexOf(word[word.length - 1]);
+  if (digit !== -1) {
+    return { closed: [true, true, false, true, false, false, true, true, true, false][digit], rieul: false };
+  }
+  return { closed: false, rieul: false };
+}
+
 /** `으로` after a final consonant, `로` after a vowel or ㄹ. */
 function josaEuro(word) {
-  const last = word.charCodeAt(word.length - 1);
-  if (last < 0xac00 || last > 0xd7a3) return "로";
-  const final = (last - 0xac00) % 28;
-  return final === 0 || final === 8 ? "로" : "으로";
+  const { closed, rieul } = endsInConsonant(word);
+  return !closed || rieul ? "로" : "으로";
+}
+
+/** `을` after a final consonant, `를` otherwise. */
+function josaEul(word) {
+  return endsInConsonant(word).closed ? "을" : "를";
 }
 
 const ACTOR_LABELS = { human: "사람", agent: "에이전트", external: "외부 편집", system: "시스템" };
@@ -684,16 +945,33 @@ function setLiveStatus(mode, label) {
 }
 
 async function api(path, options = {}) {
+  const { ifMatch, body: payload, ...rest } = options;
   const response = await fetch(path, {
-    ...options,
-    headers: { "content-type": "application/json", ...options.headers },
+    ...rest,
+    headers: {
+      "content-type": "application/json",
+      ...(ifMatch ? { "if-match": ifMatch } : {}),
+      ...options.headers,
+    },
+    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
   });
   const body = await response.json().catch(() => ({}));
+
   if (!response.ok) {
     const error = new Error(body.error?.message || `요청 실패 (${response.status})`);
     error.status = response.status;
     error.code = body.error?.code;
+    // The whole body, because a refusal often carries the useful part: the
+    // allowed transitions, the current order, the file to repair.
+    error.payload = body;
     throw error;
+  }
+
+  // Carried out of band so a caller can send it straight back as If-Match
+  // without a second request to fetch it.
+  const etag = response.headers.get("etag");
+  if (etag && typeof body === "object" && body !== null) {
+    Object.defineProperty(body, "__etag", { value: etag, enumerable: false });
   }
   return body;
 }
