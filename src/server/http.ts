@@ -28,6 +28,7 @@ import { burndownOf, recordActiveSnapshots, type Snapshot } from "../domain/burn
 import {
   commitsFor, pendingCommits, recordScan, scanCommits, type CommitLink,
 } from "../domain/commits.ts";
+import { rowsFor, toCsv, toJson } from "../domain/export.ts";
 import { RuntimeStore, type Claim } from "../storage/runtime.ts";
 import {
   CredentialStore,
@@ -442,6 +443,13 @@ async function handle(
       authed,
     );
   }
+  const exportRoute = /^\/export\.(csv|json)$/.exec(url.pathname);
+  if (exportRoute && request.method === "GET") {
+    return guard(response, authed, "issue:read", "issue:read", () =>
+      exportIssues(exportRoute[1] as "csv" | "json", url, response, authed),
+    );
+  }
+
   if (route === "POST /commits/scan") {
     // `index:rebuild`, not a token scope: reading somebody's code repository is
     // operating the board, and §6.4's seven do not cover it (S5-D2).
@@ -1516,6 +1524,65 @@ function latestRunBadge(
  */
 async function touchBurndown(context: RequestContext): Promise<void> {
   await recordActiveSnapshots(context.writable, actorOf(context)).catch(() => 0);
+}
+
+/**
+ * Downloads the current result set.
+ *
+ * Reuses the list route's own filtering by handing it the same query, so
+ * "export what I am looking at" means exactly that rather than a second
+ * interpretation of the same parameters. Read-only: no domain file is touched
+ * and nothing is written under `.localjira/` (D4, AC24).
+ */
+function exportIssues(
+  format: "csv" | "json",
+  url: URL,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const bound = context.token?.projectScope ?? null;
+  const page = listIssues(context.board, {
+    project: bound ?? url.searchParams.get("project") ?? undefined,
+    status: split(url.searchParams.getAll("status")),
+    type: split(url.searchParams.getAll("type")),
+    label: split(url.searchParams.getAll("label")),
+    sprint: split(url.searchParams.getAll("sprint")),
+    assignee: url.searchParams.get("assignee") ?? undefined,
+    q: url.searchParams.get("q") ?? undefined,
+    // Bounded like any other read. A board that outgrows this wants paging in
+    // the export too, and silently truncating would be worse than a limit.
+    limit: 5_000,
+  });
+
+  const { rows, excluded } = rowsFor(context.board, page.issues, {
+    includeQuarantined: url.searchParams.get("quarantined") === "include",
+  });
+
+  const body = format === "csv" ? toCsv(rows) : toJson(rows);
+  const stamp = new Date().toISOString().slice(0, 10);
+  response.writeHead(200, {
+    "Content-Type":
+      format === "csv" ? "text/csv; charset=utf-8" : "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Content-Disposition": `attachment; filename="localjira-${stamp}.${format}"`,
+    // §5.6 wants the omission visible. A header rather than a row, so the file
+    // itself stays a clean table.
+    ...(excluded.length === 0
+      ? {}
+      : {
+          "X-Excluded-Quarantined": String(excluded.length),
+          "X-Excluded-Paths": excluded.map((entry) => entry.path).join(","),
+        }),
+  });
+  response.end(body);
+}
+
+function split(values: string[]): string[] | undefined {
+  const cleaned = values
+    .flatMap((value) => value.split(","))
+    .map((value) => value.trim())
+    .filter((value) => value !== "");
+  return cleaned.length > 0 ? cleaned : undefined;
 }
 
 /**

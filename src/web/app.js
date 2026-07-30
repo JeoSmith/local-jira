@@ -30,6 +30,10 @@ $("#detail-close").addEventListener("click", closeDetail);
 $("#integrity-banner").addEventListener("click", toggleIntegrity);
 $("#settings-toggle").addEventListener("click", toggleSettings);
 $("#token-form").addEventListener("submit", issueToken);
+$("#export-button").addEventListener("click", () => exportCurrent("csv"));
+$("#palette-input").addEventListener("input", () => void refreshPalette());
+$("#palette-input").addEventListener("keydown", onPaletteKey);
+document.addEventListener("keydown", onGlobalKey);
 $("#git-badge").addEventListener("click", toggleGitPanel);
 $("#view-board").addEventListener("click", () => void switchView("board"));
 $("#view-backlog").addEventListener("click", () => void switchView("backlog"));
@@ -1481,4 +1485,196 @@ function element(tag, className = "", text = "") {
 
 function initials(value) {
   return value.slice(0, 2).toUpperCase();
+}
+
+
+// ── 커맨드 팔레트와 단축키 (r24a) ────────────────────────────────────────────
+
+/**
+ * What the palette can do (S5-D5).
+ *
+ * Navigation and search only. Allowing writes here would mean honouring the
+ * transition table, the claim coupling and `If-Match` on a second path, and this
+ * project has watched a duplicated rule drift three times. "새 이슈" opens the
+ * form; the write still goes through the one path that has those checks.
+ */
+const COMMANDS = [
+  { id: "board", label: "보드로 이동", run: () => switchView("board") },
+  { id: "backlog", label: "백로그로 이동", run: () => switchView("backlog") },
+  { id: "settings", label: "설정 열기", run: () => void toggleSettings() },
+  { id: "export-csv", label: "CSV로 내보내기", run: () => exportCurrent("csv") },
+  { id: "export-json", label: "JSON으로 내보내기", run: () => exportCurrent("json") },
+  { id: "help", label: "단축키 보기", run: () => openHelp() },
+];
+
+const SHORTCUTS = [
+  ["Cmd/Ctrl + K", "커맨드 팔레트 열기"],
+  ["?", "단축키 도움말"],
+  ["Esc", "팔레트·도움말 닫기"],
+  ["↑ / ↓", "결과 이동"],
+  ["Enter", "선택 실행"],
+];
+
+const palette = { open: false, items: [], active: 0, restore: null };
+
+/**
+ * Global keys.
+ *
+ * A single character binding only fires when no text field has focus: somebody
+ * typing "?" into a title is typing a question mark, and a shortcut that eats it
+ * makes the field feel broken.
+ */
+function onGlobalKey(event) {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    return openPalette();
+  }
+  if (event.key === "Escape") {
+    if (palette.open) return closePalette();
+    if (!$("#shortcut-help").hidden) return closeHelp();
+    return;
+  }
+  if (isTyping(event.target)) return;
+  if (event.key === "?") {
+    event.preventDefault();
+    openHelp();
+  }
+}
+
+function isTyping(target) {
+  if (!target) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+}
+
+function openPalette() {
+  // Remembered so Esc puts focus back where it was — a dialog that drops focus
+  // on the body leaves a keyboard user at the top of the page.
+  palette.restore = document.activeElement;
+  palette.open = true;
+  $("#palette-backdrop").hidden = false;
+  const input = $("#palette-input");
+  input.value = "";
+  input.focus();
+  void refreshPalette();
+}
+
+function closePalette() {
+  palette.open = false;
+  $("#palette-backdrop").hidden = true;
+  $("#palette-results").replaceChildren();
+  if (palette.restore && document.contains(palette.restore)) palette.restore.focus();
+  palette.restore = null;
+}
+
+function openHelp() {
+  const list = $("#shortcut-list");
+  list.replaceChildren();
+  for (const [keys, what] of SHORTCUTS) {
+    list.append(element("dt", "", keys));
+    list.append(element("dd", "", what));
+  }
+  $("#shortcut-help").hidden = false;
+}
+
+function closeHelp() {
+  $("#shortcut-help").hidden = true;
+}
+
+function onPaletteKey(event) {
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const step = event.key === "ArrowDown" ? 1 : -1;
+    const count = palette.items.length;
+    if (count === 0) return;
+    palette.active = (palette.active + step + count) % count;
+    return paintPalette();
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const item = palette.items[palette.active];
+    if (item) {
+      closePalette();
+      item.run();
+    }
+    return;
+  }
+  if (event.key === "Tab") {
+    // Focus trap: there is one field, so keeping focus here is enough. Letting
+    // Tab out would leave a modal open with focus behind it.
+    event.preventDefault();
+  }
+}
+
+async function refreshPalette() {
+  const query = $("#palette-input").value.trim();
+  const commands = COMMANDS
+    .filter((command) => query === "" || command.label.includes(query))
+    .map((command) => ({ group: "명령", label: command.label, run: command.run }));
+
+  let issues = [];
+  if (query !== "") {
+    try {
+      const found = await api(`/issues?q=${encodeURIComponent(query)}&limit=8`);
+      issues = found.issues.map((issue) => ({
+        group: "이슈",
+        label: `${issue.key} · ${issue.title || "제목 없음"}`,
+        // Shown even when quarantined, and marked: §5.6 keeps these out of
+        // ordinary listings, but the palette is how somebody goes to find the
+        // broken one. Hiding it removes the way to fix it (S5-D5).
+        note: issue.claimable === false && issue.blocked_by?.length ? "차단" : null,
+        run: () => void openDetail(issue),
+      }));
+    } catch {
+      issues = [];
+    }
+  }
+
+  palette.items = [...issues, ...commands];
+  palette.active = 0;
+  paintPalette();
+}
+
+function paintPalette() {
+  const list = $("#palette-results");
+  list.replaceChildren();
+  $("#palette-empty").hidden = palette.items.length > 0;
+
+  let group = null;
+  palette.items.forEach((item, index) => {
+    if (item.group !== group) {
+      group = item.group;
+      list.append(element("li", "palette-group", group));
+    }
+    const row = element("li", `palette-item${index === palette.active ? " active" : ""}`);
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(index === palette.active));
+    row.append(element("span", "", item.label));
+    if (item.note) row.append(element("span", "palette-note", item.note));
+    row.addEventListener("click", () => {
+      closePalette();
+      item.run();
+    });
+    list.append(row);
+  });
+}
+
+/**
+ * Downloads the current result set.
+ *
+ * The same query the list is showing, handed to the server rather than
+ * reconstructed from what the page happens to hold — the file has to match what
+ * the person is looking at, not a second reading of it.
+ */
+function exportCurrent(format) {
+  const chosen = format === "json" ? "json" : "csv";
+  const params = new URLSearchParams();
+  // Read off the controls rather than a mirror in `state`: the filter the person
+  // can see is the one the file has to match.
+  const project = $("#project-filter")?.value;
+  if (project) params.set("project", project);
+  const query = params.toString();
+  // A plain navigation, so the browser saves the file. The server writes
+  // nothing: putting an export under `.localjira/` would pollute the board.
+  window.location.href = `/export.${chosen}${query ? `?${query}` : ""}`;
 }
