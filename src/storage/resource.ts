@@ -18,6 +18,9 @@ export type ResourceErrorReason =
   | "yaml_unsupported"
   | "reserved_field"
   | "conflict_marker"
+  // A line in a .jsonl log that is not JSON. Told apart from `yaml_error`
+  // because the file is not YAML and the repair is per line, not per document.
+  | "json_error"
   // Valid YAML that is not the shape the file is supposed to hold. Separate
   // from `yaml_error` because the repair is different: the syntax is fine and
   // what needs fixing is the structure.
