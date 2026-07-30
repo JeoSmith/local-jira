@@ -37,6 +37,11 @@ document.addEventListener("keydown", onGlobalKey);
 $("#new-issue").addEventListener("click", () => openCreate());
 $("#create-cancel").addEventListener("click", closeCreate);
 $("#create-form").addEventListener("submit", submitCreate);
+$("#detail-edit").addEventListener("click", () => void openEdit());
+$("#edit-cancel").addEventListener("click", closeEdit);
+$("#edit-form").addEventListener("submit", (event) => void submitEdit(event, false));
+$("#edit-reload").addEventListener("click", () => void reloadEdit());
+$("#edit-force").addEventListener("click", () => void submitEdit(null, true));
 $("#git-badge").addEventListener("click", toggleGitPanel);
 $("#view-board").addEventListener("click", () => void switchView("board"));
 $("#view-backlog").addEventListener("click", () => void switchView("backlog"));
@@ -645,6 +650,7 @@ async function openDetail(issue) {
   $("#detail-title").textContent = issue.title || "제목 없음";
   $("#timeline").replaceChildren();
   $("#detail").hidden = false;
+  $("#detail-edit").hidden = !canCreate();
   await loadCommits();
   await loadRuns();
   await loadActivity(false);
@@ -1538,6 +1544,7 @@ function onGlobalKey(event) {
   }
   if (event.key === "Escape") {
     if (palette.open) return closePalette();
+    if (!$("#edit-backdrop").hidden) return closeEdit();
     if (!$("#create-backdrop").hidden) return closeCreate();
     if (!$("#shortcut-help").hidden) return closeHelp();
     return;
@@ -1819,4 +1826,230 @@ async function submitCreate(event) {
   closeCreate();
   announce(`이슈${josaEul("이슈")} 만들었습니다.`);
   await refreshIssues();
+}
+
+
+// ── 이슈 수정 폼 (r01d) ──────────────────────────────────────────────────────
+
+const edit = { key: null, etag: null, restore: null, busy: false, base: null };
+
+/**
+ * Opens the form on the issue's current values.
+ *
+ * Read fresh rather than taken from the card: the ETag has to be the one the
+ * save will send as `If-Match`, and a stale one turns every edit into a 412 the
+ * person did nothing to cause (§5.4).
+ */
+async function openEdit() {
+  const detail = state.detail;
+  if (!detail || !canCreate()) return;
+
+  let found;
+  try {
+    found = await apiWithEtag(`/issues/${encodeURIComponent(detail.key)}`);
+  } catch (failure) {
+    // §5.6: a quarantined issue answers 409 here, and the form must not open on
+    // a document the board cannot vouch for.
+    return void announce(`수정할 수 없습니다: ${failure.message}`, true);
+  }
+
+  edit.key = detail.key;
+  edit.etag = found.etag;
+  edit.restore = document.activeElement;
+  edit.base = fieldsOf(found.body);
+  fillEdit(edit.base);
+
+  $("#edit-key").textContent = detail.key;
+  $("#edit-error").hidden = true;
+  $("#edit-conflict").hidden = true;
+  $("#edit-backdrop").hidden = false;
+  $("#edit-title").focus();
+}
+
+function fieldsOf(resource) {
+  return {
+    title: String(resource.title ?? ""),
+    description: String(resource.body ?? ""),
+    points: resource.points === null || resource.points === undefined
+      ? ""
+      : String(resource.points),
+    labels: Array.isArray(resource.labels) ? resource.labels.join(", ") : "",
+    acceptance: Array.isArray(resource.acceptance)
+      ? resource.acceptance.map((entry) => entry.text ?? "").join("\n")
+      : "",
+  };
+}
+
+function fillEdit(fields) {
+  $("#edit-title").value = fields.title;
+  $("#edit-description").value = fields.description;
+  $("#edit-points").value = fields.points;
+  $("#edit-labels").value = fields.labels;
+  $("#edit-acceptance").value = fields.acceptance;
+}
+
+function readEdit() {
+  return {
+    title: $("#edit-title").value,
+    description: $("#edit-description").value,
+    points: $("#edit-points").value.trim(),
+    labels: $("#edit-labels").value,
+    acceptance: $("#edit-acceptance").value,
+  };
+}
+
+function closeEdit() {
+  $("#edit-backdrop").hidden = true;
+  $("#edit-conflict").hidden = true;
+  edit.key = null;
+  edit.etag = null;
+  edit.base = null;
+  if (edit.restore && document.contains(edit.restore)) edit.restore.focus();
+  edit.restore = null;
+}
+
+/**
+ * Saves, and turns a 412 into a choice rather than an apology.
+ *
+ * `force` re-sends with the ETag the server just gave, which is a
+ * last-write-wins the person asked for — different from the one D15 forbids,
+ * where the client never knew there was a conflict.
+ */
+async function submitEdit(event, force) {
+  if (event) event.preventDefault();
+  if (edit.busy || edit.key === null) return;
+
+  const now = readEdit();
+  const error = $("#edit-error");
+  if (now.title.trim() === "") {
+    error.textContent = "제목은 비울 수 없습니다.";
+    error.hidden = false;
+    return $("#edit-title").focus();
+  }
+
+  const body = {};
+  if (now.title !== edit.base.title) body.title = now.title;
+  if (now.description !== edit.base.description) body.description = now.description;
+  if (now.points !== edit.base.points) body.points = now.points === "" ? null : Number(now.points);
+  if (now.labels !== edit.base.labels) {
+    body.labels = now.labels.split(",").map((label) => label.trim()).filter(Boolean);
+  }
+  if (now.acceptance !== edit.base.acceptance) {
+    body.acceptance = now.acceptance.split("\n").map((line) => line.trim()).filter(Boolean);
+  }
+
+  if (Object.keys(body).length === 0 && !force) {
+    // Nothing changed, so nothing is written. A no-op PATCH would still be a
+    // request, and AC24 wants the badge to stay put.
+    return closeEdit();
+  }
+
+  edit.busy = true;
+  $("#edit-submit").disabled = true;
+  try {
+    await api(`/issues/${encodeURIComponent(edit.key)}`, {
+      method: "PATCH",
+      ifMatch: edit.etag,
+      body,
+    });
+  } catch (failure) {
+    if (failure.status === 412) {
+      // The server sent the current document, its ETag and the fields that
+      // disagree. Showing them is the whole point of 412 carrying them.
+      return showConflict(failure);
+    }
+    error.textContent = failure.message;
+    error.hidden = false;
+    return;
+  } finally {
+    edit.busy = false;
+    $("#edit-submit").disabled = false;
+  }
+
+  closeEdit();
+  announce(`${edit.key ?? "이슈"} 저장했습니다.`);
+  await refreshIssues();
+  if (state.detail) await loadActivity(false);
+}
+
+function showConflict(failure) {
+  // The newest ETag, so [덮어쓰기] can go through without another read.
+  edit.etag = failure.payload?.etag ?? edit.etag;
+  const conflicts = failure.payload?.conflicts ?? {};
+
+  const list = $("#edit-conflict-fields");
+  list.replaceChildren();
+  for (const [field, pair] of Object.entries(conflicts)) {
+    list.append(element("dt", "", field));
+    const dd = element("dd");
+    dd.append(element("div", "conflict-theirs", `저쪽: ${describeValue(pair.current)}`));
+    dd.append(element("div", "conflict-mine", `내 값: ${describeValue(pair.requested)}`));
+    list.append(dd);
+  }
+  if (Object.keys(conflicts).length === 0) {
+    list.append(element("dt", "", "변경"));
+    list.append(element("dd", "", "다른 곳에서 이 이슈가 바뀌었습니다."));
+  }
+
+  $("#edit-error").hidden = true;
+  $("#edit-conflict").hidden = false;
+  // Neither button is pressed for the person: an automatic merge decides
+  // something they never saw.
+  $("#edit-reload").focus();
+}
+
+function describeValue(value) {
+  if (value === null || value === undefined) return "(없음)";
+  if (Array.isArray(value)) {
+    return value.length === 0
+      ? "(없음)"
+      : value.map((entry) => (typeof entry === "object" ? entry.text ?? "" : entry)).join(", ");
+  }
+  return String(value) === "" ? "(빈 값)" : String(value);
+}
+
+/** Takes the server's values, keeping what the person wrote visible. */
+async function reloadEdit() {
+  if (edit.key === null) return;
+  const mine = readEdit();
+
+  let found;
+  try {
+    found = await apiWithEtag(`/issues/${encodeURIComponent(edit.key)}`);
+  } catch (failure) {
+    $("#edit-error").textContent = failure.message;
+    $("#edit-error").hidden = false;
+    return;
+  }
+
+  edit.etag = found.etag;
+  edit.base = fieldsOf(found.body);
+  fillEdit(edit.base);
+
+  // What they had typed, still on screen. Replacing the fields and dropping it
+  // would lose work to a conflict they did not cause.
+  const list = $("#edit-conflict-fields");
+  list.replaceChildren();
+  list.append(element("dt", "", "불러왔습니다"));
+  list.append(element("dd", "", "폼은 최신 값입니다. 아래는 방금 쓰고 있던 내용입니다."));
+  for (const [field, value] of Object.entries(mine)) {
+    if (value === edit.base[field]) continue;
+    list.append(element("dt", "", field));
+    list.append(element("dd", "conflict-mine", value === "" ? "(빈 값)" : value));
+  }
+}
+
+/** A GET that hands back the ETag as well as the body. */
+async function apiWithEtag(path) {
+  const response = await fetch(path, { headers: { "content-type": "application/json" } });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const failure = new Error(body.error?.message || `요청 실패 (${response.status})`);
+    failure.status = response.status;
+    // `payload`, the same name `api()` uses — two names for the refusal body is
+    // how the conflict screen ends up reading an empty object.
+    failure.payload = body;
+    throw failure;
+  }
+  return { body, etag: response.headers.get("etag") };
 }

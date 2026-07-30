@@ -291,22 +291,44 @@ function requireLabels(labels: string[]): string[] {
  * out again — a commit trailer or someone's memory may still point at it.
  */
 function allocateKey(board: BoardHandle, project: string): string {
-  const rows = board.db
-    .prepare(
-      `SELECT key FROM issues WHERE project = ?
-       UNION ALL
-       SELECT key FROM issue_former_keys WHERE project = ?`,
-    )
-    .all(project, project) as Array<{ key: string }>;
+  const keys = (
+    board.db
+      .prepare(
+        `SELECT key FROM issues WHERE project = ?
+         UNION ALL
+         SELECT key FROM issue_former_keys WHERE project = ?`,
+      )
+      .all(project, project) as Array<{ key: string }>
+  ).map((row) => row.key);
+
+  // Quarantined files have no issues row after a full rebuild: they never
+  // parsed, so nothing was inserted for them. Left out, this hands back a number
+  // whose file already exists — and the collision check then refuses *every* new
+  // issue until somebody repairs that one file. The path is the only place the
+  // key survives, so read it from there (§5.6).
+  //
+  // A separate query, not another UNION branch: SQLite names a compound
+  // select's columns after the first branch, so a `path` unioned onto `key`
+  // arrives as `key` and reads as a key that happens to look like a path.
+  const quarantined = (
+    board.db
+      .prepare("SELECT path FROM index_errors WHERE path LIKE ?")
+      .all(`issues/${project}/%`) as Array<{ path: string }>
+  ).map((row) => keyFromIssuePath(row.path));
 
   let highest = 0;
-  for (const row of rows) {
-    const match = /^.+-(\d+)$/.exec(row.key);
+  for (const key of [...keys, ...quarantined]) {
+    const match = /^.+-(\d+)$/.exec(key);
     if (match) {
       highest = Math.max(highest, Number(match[1]));
     }
   }
   return `${project}-${highest + 1}`;
+}
+
+/** `issues/LJ/LJ-12.md` → `LJ-12`. */
+function keyFromIssuePath(value: string): string {
+  return /^issues\/[^/]+\/(.+)\.md$/.exec(value)?.[1] ?? "";
 }
 
 interface RenderInput {
