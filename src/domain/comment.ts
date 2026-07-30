@@ -304,7 +304,10 @@ function toComment(row: Record<string, unknown>): CommentRecord {
     authorName: row.author_name === null ? null : String(row.author_name),
     actorKind: row.actor_kind === null ? null : String(row.actor_kind),
     kind: isCommentKind(kind) ? kind : DEFAULT_KIND,
-    body: String(row.body ?? ""),
+    // Trimmed: the blank line after the frontmatter is how the file is laid
+    // out, not something the author typed, and it would show up wherever the
+    // text is quoted — the agent's instruction field most of all.
+    body: String(row.body ?? "").trim(),
     resolved: Number(row.resolved) === 1,
     deleted: Number(row.deleted) === 1,
     createdAt: row.created_at === null ? null : String(row.created_at),

@@ -18,8 +18,8 @@ import {
   claimIssue, ClaimError, holdsClaimOn, recordExpiredClaims, releaseClaim,
 } from "../domain/claim.ts";
 import {
-  addComment, appendOp, COMMENT_KINDS, CommentError, isCommentOp, listComments,
-  type CommentRecord,
+  addComment, appendOp, blockingComments, COMMENT_KINDS, CommentError, isCommentOp,
+  listComments, type CommentRecord,
 } from "../domain/comment.ts";
 import {
   endRun, findRun, heartbeatRun, listRunsFor, RunError, startRun, type RunRecord,
@@ -40,6 +40,7 @@ import {
   PreconditionFailedError,
   PreconditionRequiredError,
   QuarantinedError,
+  refuseIfQuarantined,
   transitionIssue,
   TransitionError,
   updateIssue,
@@ -94,6 +95,7 @@ import { boardHealth, quarantineList } from "../storage/integrity.ts";
 import { gitStatus } from "../storage/git-status.ts";
 import { findTombstone, type ReconcileReason } from "../storage/reconcile.ts";
 import { watchBoard, type BoardWatcher } from "../storage/watcher.ts";
+import { quarantineOf } from "../storage/integrity.ts";
 import { formatEtag } from "../storage/resource.ts";
 import { EventStream } from "./stream.ts";
 
@@ -491,6 +493,12 @@ async function handle(
       ),
     );
   }
+  if (request.method === "GET" && url.pathname.endsWith("/context")) {
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/context".length));
+    return guard(response, authed, "issue:read", "issue:read", () =>
+      contextRoute(key, response, authed),
+    );
+  }
   if (request.method === "GET" && url.pathname.endsWith("/comments")) {
     const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/comments".length));
     return guard(response, authed, "issue:read", "issue:read", () =>
@@ -867,7 +875,11 @@ function listIssuesRoute(
       ? page.issues.filter(
           (issue) =>
             context.runtime.find(issue.uid) === null &&
-            (issue.status === "TODO" || issue.status === "IN_PROGRESS"),
+            (issue.status === "TODO" || issue.status === "IN_PROGRESS") &&
+            // The same rule the claim route applies. Computed in both places
+            // from one function rather than restated, so a list cannot offer
+            // work that claiming would refuse (AC22, S3 §4).
+            blockingComments(context.board, issue.key).length === 0,
         )
       : page.issues;
 
@@ -1543,6 +1555,135 @@ function respondCommentError(error: unknown, response: http.ServerResponse): voi
   throw error;
 }
 
+/**
+ * Everything an agent needs to start, in one answer (§6.2, AC21).
+ *
+ * The point is what it does *not* contain. §6.2 says not to leave an agent
+ * reading every comment and working out for itself which one was an
+ * instruction — so this carries the latest instruction as a field and no
+ * comment list at all. An agent that wants the conversation can ask for it;
+ * one that wants to work should not have to read it to find the one line that
+ * mattered.
+ */
+function contextRoute(
+  key: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  // §5.6, AC10: before the not-found check, because a quarantined issue *is*
+  // there — the board just cannot vouch for it. An agent handed a plausible
+  // context assembled from a document nobody could parse carries on into a
+  // broken issue; one told the truth stops.
+  try {
+    refuseIfQuarantined(context.board, key);
+  } catch (error) {
+    if (error instanceof QuarantinedError) {
+      return respondJson(response, 409, {
+        quarantined: true,
+        path: error.path,
+        reason: error.reason,
+        error: { code: error.code, message: error.message, detail: null },
+      });
+    }
+    throw error;
+  }
+
+  const found = findIssue(context.board, key);
+  if (!found || !("issue" in found)) {
+    return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
+  }
+
+  const issue = found.issue;
+  const resource = issue.resource as Record<string, unknown>;
+  const blocking = claimability(context.board, issue.uid);
+  const unanswered = blockingComments(context.board, issue.key);
+  const status = typeof resource.status === "string" ? resource.status : null;
+  const from = status !== null && isStatus(status) ? status : null;
+  const mine = holdsClaim(context, issue.key);
+
+  const parentUid = typeof resource.parent === "string" ? resource.parent : null;
+  const parent = parentUid === null ? null : findIssue(context.board, parentUid);
+
+  respondJson(response, 200, {
+    // The same strong ETag the issue itself carries, not a token of its own:
+    // an agent has to be able to send it straight back as If-Match (R10).
+    etag: formatEtag(issue.etag),
+    issue: { key: issue.key, uid: issue.uid, status, type: resource.type ?? null },
+    goal: {
+      title: resource.title ?? null,
+      description: typeof resource.body === "string" ? resource.body : null,
+    },
+    // Straight from frontmatter. Parsing headings out of the body would invent
+    // structure the author did not write (§5.3).
+    acceptance: Array.isArray(resource.acceptance) ? resource.acceptance : [],
+    dependencies: {
+      blocked_by: relatedTo(context.board, issue.uid)
+        .filter((entry) => entry.kind === "blocked_by")
+        .map((entry) => ({ key: entry.key, uid: entry.uid, status: entry.status })),
+      parent:
+        parent && "issue" in parent
+          ? { key: parent.issue.key, uid: parent.issue.uid }
+          : null,
+    },
+    claimable: blocking.claimable && unanswered.length === 0 && !mine,
+    blocked_reason: [
+      ...(blocking.claimable ? [] : [{ kind: "blocked_by", issues: blocking.blockedBy }]),
+      ...(unanswered.length === 0
+        ? []
+        : [{
+            kind: "unanswered_comments",
+            comments: unanswered.map((comment) => comment.commentId),
+          }]),
+    ],
+    latest_instruction: latestInstruction(context, issue.key),
+    allowed: {
+      // S4-D6: what this token may do, and what that means here. Code paths and
+      // branch boundaries are things this tool does not know, and a structured
+      // answer about them would be believed.
+      scopes: context.token?.scopes ?? null,
+      transitions:
+        from === null
+          ? []
+          : allowedTargets(from, null).filter(
+              (to) => !requiresAdmin(from, to) || context.user?.role === "admin",
+            ),
+      // Computed here rather than left to the caller, for the same reason the
+      // board card's `allowed_to` is: a second copy of §5.2 drifts.
+      needs_claim: ["IN_PROGRESS", "IN_REVIEW", "DONE"],
+      holds_claim: mine,
+    },
+  });
+}
+
+/**
+ * The most recent thing a person said that was meant as direction (S4-D5).
+ *
+ * `question` and `decision` only. Taking the latest human comment of any kind
+ * would put "고생하셨습니다" in the instruction slot, and an agent reading that
+ * as its brief is worse off than one told there is nothing.
+ */
+function latestInstruction(
+  context: RequestContext,
+  issueKey: string,
+): Record<string, unknown> | null {
+  const candidates = listComments(context.board, issueKey).filter(
+    (comment) =>
+      comment.actorKind === "human" &&
+      (comment.kind === "question" || comment.kind === "decision"),
+  );
+  const latest = candidates[candidates.length - 1];
+  return latest === undefined
+    ? null
+    : {
+        comment_id: latest.commentId,
+        kind: latest.kind,
+        author_id: latest.authorId,
+        body: latest.body,
+        resolved: latest.resolved,
+        created_at: latest.createdAt,
+      };
+}
+
 /** The three an agent may not reach on scope alone (§6.1, ADR-004 §2). */
 const CLAIM_GATED = new Set(["IN_PROGRESS", "IN_REVIEW", "DONE"]);
 
@@ -1570,6 +1711,29 @@ async function transitionRoute(
   const body = await readJson(request);
 
   const to = String(body.to ?? "");
+
+  // §6.3, AC22: an unanswered question stops an issue reaching DONE. Only for
+  // an agent — S4-D4 reads §6.3 the way §6.1 reads people, so a person is
+  // warned by the same information on their screen but is not locked out of
+  // their own board by a question only they can answer.
+  if (to === "DONE" && actorOf(context).kind === "agent") {
+    const unanswered = blockingComments(context.board, key);
+    if (unanswered.length > 0) {
+      return respondError(
+        response, 409, "E_DONE_UNANSWERED",
+        `${key} has ${unanswered.length} unanswered comment(s) and cannot be completed.`,
+        "A person answers and resolves them.",
+        {
+          unresolved_comments: unanswered.map((comment) => ({
+            comment_id: comment.commentId,
+            kind: comment.kind,
+            author_id: comment.authorId,
+          })),
+        },
+      );
+    }
+  }
+
   if (actorOf(context).kind === "agent" && CLAIM_GATED.has(to) && !holdsClaim(context, key)) {
     await recordDenial(context, {
       capability: "issue:write",
@@ -2207,6 +2371,7 @@ function respondBoard(
 
   const issues = page.issues.map(({ createdByKind, ...issue }) => {
     const claim = claimability(context.board, issue.uid);
+    const unanswered = blockingComments(context.board, issue.key);
     const blockedFrom =
       ((context.board.db
         .prepare("SELECT blocked_from FROM issues WHERE uid = ?")
@@ -2218,8 +2383,11 @@ function respondBoard(
       last_actor_kind: kinds.get(issue.uid) ?? null,
       // Carried on the card so a blocked issue looks blocked, with the reason
       // rather than just a mark (§5.2).
-      claimable: claim.claimable,
+      claimable: claim.claimable && unanswered.length === 0,
       blocked_by: claim.blockedBy,
+      // Told apart on the card as well: "waiting on LJ-3" and "somebody asked a
+      // question" need different things from the person reading it.
+      unanswered: unanswered.map((comment) => comment.commentId),
       blocked_from: blockedFrom,
       // Who is on it and how that run is doing. On the card rather than behind
       // a click because S5's whole point is finding the stalled ones by eye.
@@ -2745,6 +2913,23 @@ function showIssueRoute(
   const found = findIssue(context.board, key);
 
   if (found === null) {
+    // Quarantine first. The issue is on disk; the board simply cannot vouch for
+    // the file. Saying "no such issue" would send somebody looking for a thing
+    // that is sitting right there with a conflict marker in it (§5.6, AC10).
+    const held = quarantineOf(context.board.db, key);
+    if (held !== null) {
+      return respondJson(response, 409, {
+        quarantined: true,
+        path: held.path,
+        reason: held.reason,
+        error: {
+          code: "E_ISSUE_QUARANTINED",
+          message: `${key} is quarantined (${held.reason}) and cannot be read until it is repaired.`,
+          detail: held.detail,
+        },
+      });
+    }
+
     // A tombstone still answers, because "it was here and it is gone" is a
     // different and more useful answer than "never heard of it" — especially
     // after a pull, where the caller's next question is which file went away.
@@ -2783,9 +2968,21 @@ function showIssueRoute(
   // same reason: an issue's validator must not move because its blocker was
   // closed. /issues/{key}/links carries the reasons in full.
   const claim = claimability(context.board, found.issue.uid);
-  response.setHeader("X-Claimable", String(claim.claimable));
+  const unanswered = blockingComments(context.board, found.issue.key);
+  response.setHeader(
+    "X-Claimable",
+    String(claim.claimable && unanswered.length === 0),
+  );
   if (claim.blockedBy.length > 0) {
     response.setHeader("X-Blocked-By", claim.blockedBy.join(","));
+  }
+  // A separate header, not merged into X-Blocked-By: one is answered by
+  // finishing another issue and the other by answering a person (§5.2, r19b).
+  if (unanswered.length > 0) {
+    response.setHeader(
+      "X-Unanswered-Comments",
+      unanswered.map((comment) => comment.commentId).join(","),
+    );
   }
 
   // Headers for the same reason as the two above: a claim is runtime state that

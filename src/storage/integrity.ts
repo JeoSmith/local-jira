@@ -346,17 +346,64 @@ export function quarantineOf(db: DatabaseSync, key: string): QuarantineRecord | 
       }
     | undefined;
 
-  return row
+  if (row) {
+    return {
+      path: row.path,
+      uid: row.uid,
+      key: row.key,
+      reason: row.reason,
+      detail: row.detail,
+      lastGoodHash: row.last_good_hash,
+      detectedAt: new Date(row.detected_at).toISOString(),
+    };
+  }
+
+  // No row to join against. That is the normal state after a full rebuild: the
+  // file never parsed, so nothing was ever inserted for it, and the join above
+  // finds nothing however clearly `index_errors` names the file. Without this
+  // fallback a conflicted issue reads as "no such issue" after a rebuild —
+  // which is what someone gets after `git clean` or a schema bump, exactly
+  // when they most need to be told which file to fix.
+  const orphan = db
+    .prepare(
+      `SELECT path, uid, reason, detail, last_good_hash, detected_at
+         FROM index_errors WHERE path = ? LIMIT 1`,
+    )
+    .get(issuePathFor(db, key)) as
+    | {
+        path: string;
+        uid: string | null;
+        reason: string;
+        detail: string | null;
+        last_good_hash: string | null;
+        detected_at: number;
+      }
+    | undefined;
+
+  return orphan
     ? {
-        path: row.path,
-        uid: row.uid,
-        key: row.key,
-        reason: row.reason,
-        detail: row.detail,
-        lastGoodHash: row.last_good_hash,
-        detectedAt: new Date(row.detected_at).toISOString(),
+        path: orphan.path,
+        uid: orphan.uid,
+        key,
+        reason: orphan.reason,
+        detail: orphan.detail,
+        lastGoodHash: orphan.last_good_hash,
+        detectedAt: new Date(orphan.detected_at).toISOString(),
       }
     : null;
+}
+
+/**
+ * Where an issue with this key would live.
+ *
+ * Derived from the layout rather than looked up, because the lookup is exactly
+ * what is unavailable here. The project comes from the key's prefix, which is
+ * how keys are minted (`LJ-12` lives under `issues/LJ/`).
+ */
+function issuePathFor(db: DatabaseSync, key: string): string {
+  void db;
+  const project = /^([^-]+)-/.exec(key)?.[1] ?? "";
+  return `issues/${project}/${key}.md`;
 }
 
 /** True when the uid names an entity that is currently quarantined. */

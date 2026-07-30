@@ -1,5 +1,6 @@
 import { buildEvent } from "./events.ts";
 import { timestamp, type Actor } from "./issue.ts";
+import { blockingComments } from "./comment.ts";
 import { claimability } from "./links.ts";
 import { findRun, RunError, type RunRecord } from "./run.ts";
 import { findIssue, type BoardHandle, type WritableBoard } from "../storage/board.ts";
@@ -96,6 +97,25 @@ export async function claimIssue(
       `${key} is waiting on ${blocking.blockedBy.join(", ")}.`,
       "Finish the blocking issues, or remove the blocked_by link.",
       { blocked_by: blocking.blockedBy },
+    );
+  }
+
+  // §6.3, AC22. Its own code, not folded into E_CLAIM_BLOCKED: one is answered
+  // by finishing another issue and the other by answering a person, and an
+  // agent told only "blocked" would go looking in the wrong place.
+  const unanswered = blockingComments(board, issue.key);
+  if (unanswered.length > 0) {
+    throw new ClaimError(
+      "E_CLAIM_UNANSWERED",
+      `${key} has ${unanswered.length} unanswered comment(s).`,
+      "A person answers and resolves them.",
+      {
+        unresolved_comments: unanswered.map((comment) => ({
+          comment_id: comment.commentId,
+          kind: comment.kind,
+          author_id: comment.authorId,
+        })),
+      },
     );
   }
 
