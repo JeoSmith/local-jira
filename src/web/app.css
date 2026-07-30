@@ -330,3 +330,24 @@ form button:disabled { opacity: .55; cursor: wait; }
 @media (prefers-color-scheme: dark) {
   .run-no-result { background: #33290f; color: #f0d3a8; }
 }
+
+/* ── 번다운 ──────────────────────────────────────────────────────────────── */
+.burndown { margin: 10px 0; }
+.burndown-summary { margin: 0 0 8px; font-size: 13px; }
+.burndown-chart { border: 1px solid var(--line); border-radius: 8px; background: var(--card);
+  padding: 6px; overflow-x: auto; }
+.burndown-svg { display: block; width: 100%; height: auto; min-width: 420px; }
+.burndown-grid { stroke: var(--line); stroke-width: 1; }
+.burndown-tick { fill: var(--muted); font-size: 10px; text-anchor: end; }
+/* Dashed and square-marked; the colour is the third signal, not the only one. */
+.burndown-scope { fill: none; stroke: #8a6d1f; stroke-width: 2; stroke-dasharray: 6 4; }
+.burndown-scope-dot { fill: #8a6d1f; }
+.burndown-done { fill: none; stroke: #2f6b46; stroke-width: 2; }
+.burndown-done-dot { fill: #2f6b46; }
+
+@media (prefers-color-scheme: dark) {
+  .burndown-scope, .burndown-scope-dot { stroke: #f0d3a8; fill: #f0d3a8; }
+  .burndown-scope { fill: none; }
+  .burndown-done, .burndown-done-dot { stroke: #a8dcbb; fill: #a8dcbb; }
+  .burndown-done { fill: none; }
+}
