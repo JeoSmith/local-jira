@@ -59,13 +59,26 @@ export class RuntimeStore {
     fs.mkdirSync(localDirectory, { recursive: true });
     this.path = path.join(localDirectory, RUNTIME_FILENAME);
     this.#db = new DatabaseSync(this.path);
-    // Before `journal_mode`, which briefly needs an exclusive lock: two
-    // connections opening at once would otherwise have one fail outright rather
-    // than wait its turn. ADR-002 means only one server holds this board, so in
-    // production the second connection is a CLI or a test — neither of which
-    // should be told the database is broken when it is merely busy.
+    // First, so every statement below waits its turn rather than failing on a
+    // lock somebody else holds for a moment.
     this.#db.exec("PRAGMA busy_timeout = 5000");
-    this.#db.exec("PRAGMA journal_mode = WAL");
+
+    // WAL is a property of the database file, not of this connection: once any
+    // process sets it, every later one opens in WAL without asking. Switching
+    // it needs a brief exclusive lock that `busy_timeout` does not cover — the
+    // upgrade returns SQLITE_BUSY straight away — so a second process opening
+    // at the same moment used to be told the database was broken when it was
+    // merely being set up. Ask first, and let a lost race be somebody else
+    // doing the same work.
+    const mode = this.#db.prepare("PRAGMA journal_mode").get() as { journal_mode?: string };
+    if (String(mode?.journal_mode ?? "").toLowerCase() !== "wal") {
+      try {
+        this.#db.exec("PRAGMA journal_mode = WAL");
+      } catch {
+        // Another connection is setting it. The mode persists, so this one gets
+        // WAL regardless; failing here would turn a race into an outage.
+      }
+    }
     this.#db.exec(SCHEMA);
   }
 
