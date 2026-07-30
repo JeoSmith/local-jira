@@ -1,0 +1,10 @@
+# Written by the browser used to verify UI stories. Session artefacts, not
+# source — two of these reached a commit before this file existed.
+.playwright-mcp/
+
+# A board created inside the repository while trying something out. The real
+# one lives in a worktree of the data branch (ADR-006); a nested copy is a
+# scratch board and never belongs in this history.
+.localjira/
+
+node_modules/
