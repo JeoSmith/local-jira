@@ -37,6 +37,7 @@
             <span>Local Jira</span>
           </div>
           <div class="topbar-actions">
+          <button id="new-issue" type="button" class="ghost-button primary" hidden>신규</button>
           <button id="export-button" type="button" class="ghost-button">내보내기</button>
           <button id="git-badge" type="button" class="git-badge" hidden aria-expanded="false"></button>
           <button id="settings-toggle" type="button" class="ghost-button">설정</button>
@@ -92,6 +93,40 @@
         <p id="board-live" class="sr-only" role="status" aria-live="polite"></p>
         <p id="board-hint" class="sr-only">카드에 포커스를 두고 왼쪽·오른쪽 화살표로 컬럼을 옮기고, 위·아래 화살표로 순서를 바꿉니다.</p>
       </section>
+
+      <div id="create-backdrop" class="palette-backdrop" hidden>
+        <form id="create-form" class="palette create-form" aria-label="새 이슈">
+          <h2 class="detail-section">새 이슈</h2>
+          <div class="create-row">
+            <label for="create-project">프로젝트</label>
+            <select id="create-project"></select>
+            <label for="create-type">타입</label>
+            <select id="create-type">
+              <option value="task">task</option>
+              <option value="story">story</option>
+              <option value="bug">bug</option>
+              <option value="epic">epic</option>
+            </select>
+            <label for="create-points">포인트</label>
+            <input id="create-points" type="number" min="0" step="1" inputmode="numeric" />
+          </div>
+          <label for="create-title">제목</label>
+          <!-- No `required`: the browser's own bubble would pre-empt the message this
+               form wants to give, in whatever language the browser chose. -->
+          <input id="create-title" type="text" maxlength="200" />
+          <label for="create-description">설명</label>
+          <textarea id="create-description" rows="3"></textarea>
+          <label for="create-labels">라벨 (쉼표로 구분)</label>
+          <input id="create-labels" type="text" placeholder="web, perf" />
+          <label for="create-acceptance">인수조건 (한 줄에 하나)</label>
+          <textarea id="create-acceptance" rows="3"></textarea>
+          <p id="create-error" class="form-error" role="alert" hidden></p>
+          <div class="create-actions">
+            <button type="button" id="create-cancel" class="ghost-button">취소</button>
+            <button type="submit" id="create-submit">만들기</button>
+          </div>
+        </form>
+      </div>
 
       <div id="palette-backdrop" class="palette-backdrop" hidden>
         <div id="palette" class="palette" role="dialog" aria-modal="true" aria-label="커맨드 팔레트">

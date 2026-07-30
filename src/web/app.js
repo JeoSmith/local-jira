@@ -34,6 +34,9 @@ $("#export-button").addEventListener("click", () => exportCurrent("csv"));
 $("#palette-input").addEventListener("input", () => void refreshPalette());
 $("#palette-input").addEventListener("keydown", onPaletteKey);
 document.addEventListener("keydown", onGlobalKey);
+$("#new-issue").addEventListener("click", () => openCreate());
+$("#create-cancel").addEventListener("click", closeCreate);
+$("#create-form").addEventListener("submit", submitCreate);
 $("#git-badge").addEventListener("click", toggleGitPanel);
 $("#view-board").addEventListener("click", () => void switchView("board"));
 $("#view-backlog").addEventListener("click", () => void switchView("backlog"));
@@ -106,6 +109,7 @@ function showBoard(user) {
   $("#login-view").hidden = true;
   $("#board-view").hidden = false;
   $("#user-name").textContent = user.displayName || user.id;
+  refreshCreateAffordance();
 }
 
 async function refreshIssues() {
@@ -1501,6 +1505,9 @@ function initials(value) {
 const COMMANDS = [
   { id: "board", label: "보드로 이동", run: () => switchView("board") },
   { id: "backlog", label: "백로그로 이동", run: () => switchView("backlog") },
+  // S5-D5: opens the form. The write still goes through the one path that
+  // honours the transition table, the claim coupling and If-Match.
+  { id: "new", label: "새 이슈", run: () => openCreate() },
   { id: "settings", label: "설정 열기", run: () => void toggleSettings() },
   { id: "export-csv", label: "CSV로 내보내기", run: () => exportCurrent("csv") },
   { id: "export-json", label: "JSON으로 내보내기", run: () => exportCurrent("json") },
@@ -1531,6 +1538,7 @@ function onGlobalKey(event) {
   }
   if (event.key === "Escape") {
     if (palette.open) return closePalette();
+    if (!$("#create-backdrop").hidden) return closeCreate();
     if (!$("#shortcut-help").hidden) return closeHelp();
     return;
   }
@@ -1677,4 +1685,138 @@ function exportCurrent(format) {
   // A plain navigation, so the browser saves the file. The server writes
   // nothing: putting an export under `.localjira/` would pollute the board.
   window.location.href = `/export.${chosen}${query ? `?${query}` : ""}`;
+}
+
+
+// ── 이슈 생성 폼 (r01c) ──────────────────────────────────────────────────────
+
+const create = { restore: null, busy: false, nonce: null };
+
+/**
+ * Whether this session may create an issue.
+ *
+ * Hidden rather than shown-and-refused: AC7 asks that a command somebody cannot
+ * run not be offered, and a button that answers 403 teaches people to distrust
+ * the toolbar.
+ */
+function canCreate() {
+  return state.user?.role === "admin" || state.user?.role === "member";
+}
+
+function refreshCreateAffordance() {
+  $("#new-issue").hidden = !canCreate();
+}
+
+function openCreate() {
+  if (!canCreate()) return;
+  create.restore = document.activeElement;
+  // One nonce per opening. Combined with a digest of the payload it makes the
+  // idempotency key stable for the same submission and different for a
+  // corrected one — so a double-click is deduplicated by the server while a
+  // fixed-and-resent form is a new request rather than a 409 (S3-D4).
+  create.nonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  $("#create-error").hidden = true;
+
+  const select = $("#create-project");
+  const projects = [...new Set(state.issues.map((issue) => issue.key.split("-")[0]))];
+  const options = projects.length > 0 ? projects : [$("#project-filter")?.value].filter(Boolean);
+  select.replaceChildren();
+  for (const project of options) {
+    const option = element("option", "", project);
+    option.value = project;
+    select.append(option);
+  }
+  // The context the person was looking at is the default, and a question with
+  // one possible answer is not worth asking.
+  const filtered = $("#project-filter")?.value;
+  if (filtered && options.includes(filtered)) select.value = filtered;
+  select.disabled = options.length <= 1;
+
+  $("#create-backdrop").hidden = false;
+  $("#create-title").focus();
+}
+
+function closeCreate() {
+  $("#create-backdrop").hidden = true;
+  $("#create-form").reset();
+  if (create.restore && document.contains(create.restore)) create.restore.focus();
+  create.restore = null;
+}
+
+/**
+ * A short, stable digest of a request body.
+ *
+ * Not a cryptographic hash — it only has to differ when the payload does, and
+ * the key is scoped to one form opening by its nonce. FNV-1a because it is four
+ * lines and this file has no dependencies (S2-D1).
+ */
+function digestOf(value) {
+  const text = JSON.stringify(value);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(36);
+}
+
+async function submitCreate(event) {
+  event.preventDefault();
+  if (create.busy) return;
+
+  const title = $("#create-title").value.trim();
+  const error = $("#create-error");
+  if (title === "") {
+    // Stopped here rather than sent and refused: a round trip to be told the
+    // title is empty is a round trip nobody needed.
+    error.textContent = "제목을 입력하세요.";
+    error.hidden = false;
+    return $("#create-title").focus();
+  }
+
+  const points = $("#create-points").value.trim();
+  const body = {
+    project: $("#create-project").value,
+    type: $("#create-type").value,
+    title,
+    ...(($("#create-description").value.trim() !== "")
+      ? { description: $("#create-description").value }
+      : {}),
+    ...(points !== "" ? { points: Number(points) } : {}),
+    labels: $("#create-labels").value
+      .split(",")
+      .map((label) => label.trim())
+      .filter((label) => label !== ""),
+    acceptance: $("#create-acceptance").value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== ""),
+  };
+
+  create.busy = true;
+  $("#create-submit").disabled = true;
+  try {
+    await api("/issues", {
+      method: "POST",
+      body,
+      // r15. Derived from what is being sent, not from the clock: two clicks on
+      // the same form carry the same key and the server answers the second from
+      // the first, which is the guarantee rather than a hope that the disabled
+      // button won.
+      headers: { "idempotency-key": `web-${create.nonce}-${digestOf(body)}` },
+    });
+  } catch (failure) {
+    // The server's own message, not a second copy of its rules: a validation
+    // rule restated here is one that drifts (`requireLabels` is the example).
+    error.textContent = failure.message;
+    error.hidden = false;
+    return;
+  } finally {
+    create.busy = false;
+    $("#create-submit").disabled = false;
+  }
+
+  closeCreate();
+  announce(`이슈${josaEul("이슈")} 만들었습니다.`);
+  await refreshIssues();
 }
