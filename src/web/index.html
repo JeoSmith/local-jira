@@ -37,6 +37,7 @@
             <span>Local Jira</span>
           </div>
           <div class="topbar-actions">
+          <button id="export-button" type="button" class="ghost-button">내보내기</button>
           <button id="git-badge" type="button" class="git-badge" hidden aria-expanded="false"></button>
           <button id="settings-toggle" type="button" class="ghost-button">설정</button>
             <span id="live-status" class="live-status"><i></i> 연결 중</span>
@@ -91,6 +92,24 @@
         <p id="board-live" class="sr-only" role="status" aria-live="polite"></p>
         <p id="board-hint" class="sr-only">카드에 포커스를 두고 왼쪽·오른쪽 화살표로 컬럼을 옮기고, 위·아래 화살표로 순서를 바꿉니다.</p>
       </section>
+
+      <div id="palette-backdrop" class="palette-backdrop" hidden>
+        <div id="palette" class="palette" role="dialog" aria-modal="true" aria-label="커맨드 팔레트">
+          <input id="palette-input" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="이슈 검색 또는 명령…" aria-controls="palette-results" />
+          <p id="palette-hint" class="palette-hint">↑↓ 이동 · Enter 실행 · Esc 닫기</p>
+          <ul id="palette-results" class="palette-results" role="listbox"></ul>
+          <p id="palette-empty" class="palette-empty" hidden>결과가 없습니다.</p>
+        </div>
+      </div>
+
+      <div id="shortcut-help" class="palette-backdrop" hidden>
+        <div class="palette" role="dialog" aria-modal="true" aria-label="단축키">
+          <h2 class="detail-section">단축키</h2>
+          <dl id="shortcut-list" class="index-facts"></dl>
+          <p class="palette-hint">Esc로 닫습니다.</p>
+        </div>
+      </div>
 
       <section id="settings-view" class="settings-view" hidden aria-label="설정">
         <h2 class="detail-section">인덱스</h2>
