@@ -24,6 +24,7 @@ import {
 import {
   endRun, findRun, heartbeatRun, listRunsFor, RunError, startRun, type RunRecord,
 } from "../domain/run.ts";
+import { burndownOf, recordActiveSnapshots, type Snapshot } from "../domain/burndown.ts";
 import { RuntimeStore, type Claim } from "../storage/runtime.ts";
 import {
   CredentialStore,
@@ -176,6 +177,10 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
         `(${writable.replay.rolledForward} rolled forward, ${writable.replay.aborted} abandoned)\n`,
     );
   }
+
+  // S4-D8: one at startup, because there is no daemon to do it at midnight. A
+  // day the server never ran has no measurement, and none is invented for it.
+  await recordActiveSnapshots(writable, { id: "system", kind: "human" }).catch(() => 0);
 
   const stream = new EventStream();
 
@@ -652,6 +657,26 @@ async function handle(
         ? startSprintRoute(id, response, authed)
         : closeSprintRoute(id, request, response, authed),
     );
+  }
+
+  const burndown = /^\/sprints\/([^/]+)\/burndown$/.exec(url.pathname);
+  if (burndown && request.method === "GET") {
+    return guard(response, authed, "issue:read", "issue:read", () => {
+      const chart = burndownOf(authed.board, decodeURIComponent(burndown[1]));
+      if (chart === null) {
+        return respondError(response, 404, "E_SPRINT_NOT_FOUND", "No such sprint.");
+      }
+      respondJson(response, 200, {
+        sprint: chart.sprintId,
+        status: chart.status,
+        completion: chart.completion,
+        // Board-wide, and named as such: after a rebuild the board cannot say
+        // which sprint an unparseable file belonged to (§5.6).
+        unindexed: chart.unindexed,
+        current: snapshotView(chart.current),
+        snapshots: chart.snapshots.map(snapshotView),
+      });
+    });
   }
 
   const sprintPlan = /^\/sprints\/([^/]+)\/plan$/.exec(url.pathname);
@@ -1201,6 +1226,7 @@ async function updateIssueRoute(
     );
 
     if (result.changed) {
+      await touchBurndown(context);
       publishIssueChange(context, result.issue.key, result.issue.uid, "updated");
     }
     respondResource(response, 200, result.issue.resource as JsonValue, result.issue.etag);
@@ -1425,6 +1451,32 @@ function latestRunBadge(
         // finished, and S5 asks for the difference to be visible (r17b AC10).
         has_result: latest.result !== null,
       };
+}
+
+/**
+ * Brings today's measurement up to date after a write.
+ *
+ * S4-D8: no scheduler, so the writes themselves are the clock. Cheap because
+ * `recordSnapshot` compares before writing — a change that does not move scope
+ * or status touches no file. Failures are swallowed on purpose: a chart that
+ * could not be updated must not turn somebody's successful transition into an
+ * error.
+ */
+async function touchBurndown(context: RequestContext): Promise<void> {
+  await recordActiveSnapshots(context.writable, actorOf(context)).catch(() => 0);
+}
+
+function snapshotView(entry: Snapshot): Record<string, unknown> {
+  return {
+    date: entry.date,
+    scope_points: entry.scopePoints,
+    done_points: entry.donePoints,
+    // Beside the two numbers, never inside them: an unestimated issue folded in
+    // as zero would make the chart claim a scope it does not cover (AC23, D8).
+    unestimated: entry.unestimated,
+    cancelled: entry.cancelled,
+    quarantined: entry.quarantined,
+  };
 }
 
 function claimView(claim: Claim | null): Record<string, unknown> | null {
@@ -1760,6 +1812,7 @@ async function transitionRoute(
       context.user!.role,
     );
     if (result.changed) {
+      await touchBurndown(context);
       publishIssueChange(context, result.issue.key, result.issue.uid, "transitioned");
     }
     respondResource(response, 200, result.issue.resource as JsonValue, result.issue.etag);
@@ -2533,6 +2586,9 @@ async function moveIssuesRoute(
     }
   }
 
+  if (moved.length > 0) {
+    await touchBurndown(context);
+  }
   for (const key of moved) {
     publishIssueChange(context, key, null, "updated");
   }

@@ -1046,8 +1046,142 @@ async function refreshIndexFacts() {
   // A run already in flight has to be visible, or the only way to find out is
   // to press the button again (AC).
   setIndexBusy(payload.running);
+  await refreshBurndown();
   await refreshTokens();
   await refreshRekeys();
+}
+
+/**
+ * The burndown for whichever sprint is running.
+ *
+ * Two series, and never distinguished by colour alone (§8): the remaining line
+ * is solid with round markers, the scope line is dashed with square ones, and
+ * both are named in the summary above. A reader who cannot tell the two hues
+ * apart still can tell the two lines apart.
+ */
+async function refreshBurndown() {
+  let sprints;
+  try {
+    sprints = await api("/projects/LJ/sprints?status=ACTIVE");
+  } catch {
+    return;
+  }
+
+  const active = sprints.sprints?.[0];
+  $("#burndown-empty").hidden = Boolean(active);
+  $("#burndown").hidden = !active;
+  if (!active) return;
+
+  let chart;
+  try {
+    chart = await api(`/sprints/${encodeURIComponent(active.id)}/burndown`);
+  } catch {
+    return;
+  }
+
+  const current = chart.current;
+  const done = current.done_points;
+  const scope = current.scope_points;
+  $("#burndown-summary").textContent =
+    chart.completion === null
+      ? `추정된 이슈가 없어 완료율을 계산하지 않습니다 · 무추정 ${current.unestimated}건`
+      : `${done} / ${scope}점 완료 (${chart.completion}%) · ` +
+        `남은 포인트는 실선, 스코프는 점선` +
+        (current.unestimated ? ` · 무추정 ${current.unestimated}건` : "") +
+        (current.cancelled ? ` · 취소 ${current.cancelled}건` : "");
+
+  // Named rather than left to the eye: a number missing from a total has to be
+  // visible as a number, not as a slightly lower line (AC23, §5.6).
+  const notes = [];
+  if (current.unestimated) notes.push(`무추정 ${current.unestimated}건은 분모에서 제외됩니다.`);
+  if (current.cancelled) notes.push(`취소 ${current.cancelled}건은 분모에서 제외됩니다.`);
+  if (chart.unindexed) {
+    notes.push(`인덱싱하지 못한 파일 ${chart.unindexed}건이 집계에서 빠져 있습니다.`);
+  }
+  const note = $("#burndown-note");
+  note.textContent = notes.join(" ");
+  note.hidden = notes.length === 0;
+
+  drawBurndown($("#burndown-chart"), chart.snapshots);
+}
+
+/** An SVG line chart, built by hand because the stack has no dependencies (S2-D1). */
+function drawBurndown(host, snapshots) {
+  host.replaceChildren();
+  if (!snapshots.length) return;
+
+  const W = 640;
+  const H = 220;
+  const pad = { top: 16, right: 16, bottom: 34, left: 44 };
+  const top = Math.max(1, ...snapshots.map((s) => s.scope_points));
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  // One column per sample, evenly spaced. The x axis is the samples we have,
+  // not a calendar — S4-D8 keeps days nobody measured out of the data, and
+  // spacing them as if they existed would put them back in (S4-D8).
+  const x = (i) =>
+    pad.left + (snapshots.length === 1 ? plotW / 2 : (i * plotW) / (snapshots.length - 1));
+  const y = (v) => pad.top + plotH - (v / top) * plotH;
+
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.setAttribute("class", "burndown-svg");
+  svg.setAttribute("aria-label", burndownAlt(snapshots));
+
+  const add = (tag, attrs) => {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, String(value));
+    svg.append(node);
+    return node;
+  };
+
+  for (let step = 0; step <= 2; step += 1) {
+    const value = (top / 2) * step;
+    add("line", {
+      x1: pad.left, x2: W - pad.right, y1: y(value), y2: y(value), class: "burndown-grid",
+    });
+    const label = add("text", { x: pad.left - 8, y: y(value) + 4, class: "burndown-tick" });
+    label.textContent = String(Math.round(value));
+  }
+
+  const line = (key, className) =>
+    add("polyline", {
+      points: snapshots.map((s, i) => `${x(i)},${y(s[key])}`).join(" "),
+      class: className,
+    });
+
+  line("scope_points", "burndown-scope");
+  line("done_points", "burndown-done");
+
+  snapshots.forEach((s, i) => {
+    // Square for scope, circle for remaining: the second signal, so the two
+    // series survive a reader who cannot separate the colours.
+    add("rect", {
+      x: x(i) - 3, y: y(s.scope_points) - 3, width: 6, height: 6, class: "burndown-scope-dot",
+    });
+    add("circle", { cx: x(i), cy: y(s.done_points), r: 3.5, class: "burndown-done-dot" });
+  });
+
+  const first = add("text", { x: pad.left, y: H - 12, class: "burndown-tick" });
+  first.textContent = snapshots[0].date;
+  if (snapshots.length > 1) {
+    const last = add("text", {
+      x: W - pad.right, y: H - 12, class: "burndown-tick", "text-anchor": "end",
+    });
+    last.textContent = snapshots[snapshots.length - 1].date;
+  }
+
+  host.append(svg);
+}
+
+/** What a screen reader gets instead of the picture. */
+function burndownAlt(snapshots) {
+  const last = snapshots[snapshots.length - 1];
+  return (
+    `번다운 차트. 표본 ${snapshots.length}개, ${snapshots[0].date}부터 ${last.date}까지. ` +
+    `현재 스코프 ${last.scope_points}점, 완료 ${last.done_points}점.`
+  );
 }
 
 /**
