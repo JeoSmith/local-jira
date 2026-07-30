@@ -272,7 +272,10 @@ function commentRecords(
  */
 function commentOpRecords(identity: FileIdentity, bytes: Buffer): FileRecords {
   const commentId = identity.owner ?? "";
-  const ops = readJsonLines(bytes)
+  // Strict, unlike the event log: an op decides whether a comment is resolved,
+  // and a dropped line answers that question wrongly without telling anyone.
+  // Quarantining shows the file and leaves the last good state in place (§5.6).
+  const ops = readJsonLines(bytes, true)
     .map((line) => line as Row)
     .sort((a, b) => String(a.op_id ?? "").localeCompare(String(b.op_id ?? "")));
 
@@ -363,20 +366,38 @@ function eventRecords(identity: FileIdentity, bytes: Buffer): FileRecords {
 }
 
 /** Tolerates a trailing partial line: a crash mid-append leaves one behind. */
-function readJsonLines(bytes: Buffer): JsonValue[] {
+/**
+ * Reads a `.jsonl` file.
+ *
+ * A torn *final* line is expected and skipped: a crash between the write and
+ * the newline leaves exactly that, and the record it would have held was never
+ * acknowledged to anyone. Any other unreadable line is corruption, and what
+ * happens next depends on what the file is for — see `strict`.
+ */
+function readJsonLines(bytes: Buffer, strict = false): JsonValue[] {
   const out: JsonValue[] = [];
-  for (const line of bytes.toString("utf8").split("\n")) {
+  const text = bytes.toString("utf8");
+  const lines = text.split("\n");
+  const endsClean = text.endsWith("\n");
+
+  lines.forEach((line, index) => {
     const trimmed = line.trim();
     if (trimmed === "") {
-      continue;
+      return;
     }
     try {
       out.push(JSON.parse(trimmed) as JsonValue);
     } catch {
-      // Ignore: an unterminated final line is expected after a crash, and a
-      // malformed line is caught by validation rather than aborting the scan.
+      const isTornTail = !endsClean && index === lines.length - 1;
+      if (strict && !isTornTail) {
+        throw new ResourceParseError(
+          "json_error",
+          `Line ${index + 1} is not JSON.`,
+          index + 1,
+        );
+      }
     }
-  }
+  });
   return out;
 }
 

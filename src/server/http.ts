@@ -18,6 +18,10 @@ import {
   claimIssue, ClaimError, holdsClaimOn, recordExpiredClaims, releaseClaim,
 } from "../domain/claim.ts";
 import {
+  addComment, appendOp, COMMENT_KINDS, CommentError, isCommentOp, listComments,
+  type CommentRecord,
+} from "../domain/comment.ts";
+import {
   endRun, findRun, heartbeatRun, listRunsFor, RunError, startRun, type RunRecord,
 } from "../domain/run.ts";
 import { RuntimeStore, type Claim } from "../storage/runtime.ts";
@@ -477,6 +481,26 @@ async function handle(
       withIdempotency(request, response, authed, (idempotency) =>
         createIssueRoute(request, response, authed, idempotency),
       ),
+    );
+  }
+  if (request.method === "POST" && url.pathname.endsWith("/comments")) {
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/comments".length));
+    return guard(response, authed, "issue:write", "issue:comment", () =>
+      withIdempotency(request, response, authed, (idempotency) =>
+        addCommentRoute(key, request, response, authed, idempotency),
+      ),
+    );
+  }
+  if (request.method === "GET" && url.pathname.endsWith("/comments")) {
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/comments".length));
+    return guard(response, authed, "issue:read", "issue:read", () =>
+      listCommentsRoute(key, response, authed),
+    );
+  }
+  const commentOp = /^\/comments\/([^/]+)\/ops$/.exec(url.pathname);
+  if (commentOp && request.method === "POST") {
+    return guard(response, authed, "issue:write", "issue:comment", () =>
+      commentOpRoute(decodeURIComponent(commentOp[1]), request, response, authed),
     );
   }
   if (request.method === "DELETE" && url.pathname.endsWith("/claim")) {
@@ -1417,6 +1441,104 @@ function respondRunError(error: unknown, response: http.ServerResponse): void {
   }
   if (error instanceof IssueError) {
     return respondError(response, 400, error.code, error.message, error.detail);
+  }
+  throw error;
+}
+
+async function addCommentRoute(
+  key: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+  idempotency?: { actorId: string; key: string },
+): Promise<void> {
+  const body = await readJson(request);
+  try {
+    const comment = await addComment(
+      context.writable,
+      {
+        issue: key,
+        body: String(body.body ?? ""),
+        kind: typeof body.kind === "string" ? body.kind : undefined,
+        idempotency,
+      },
+      actorOf(context),
+      context.user!.displayName,
+    );
+    response.setHeader("Location", `/comments/${comment.commentId}`);
+    respondJson(response, 201, commentView(comment));
+  } catch (error) {
+    return respondCommentError(error, response);
+  }
+}
+
+function listCommentsRoute(
+  key: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const found = findIssue(context.board, key);
+  if (!found || !("issue" in found)) {
+    return respondError(response, 404, "E_UNKNOWN_ISSUE", `No issue ${key}.`);
+  }
+  respondJson(response, 200, {
+    comments: listComments(context.board, found.issue.key).map(commentView),
+  });
+}
+
+async function commentOpRoute(
+  commentId: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  const op = String(body.op ?? "");
+  if (!isCommentOp(op)) {
+    return respondError(
+      response, 400, "E_INVALID_COMMENT_OP",
+      `"${op}" is not a comment op.`,
+      "Allowed: resolve, unresolve, edit, delete",
+    );
+  }
+
+  try {
+    const comment = await appendOp(
+      context.writable,
+      commentId,
+      { op, body: typeof body.body === "string" ? body.body : undefined },
+      actorOf(context),
+      context.user!.role,
+    );
+    respondJson(response, 200, commentView(comment));
+  } catch (error) {
+    return respondCommentError(error, response);
+  }
+}
+
+function commentView(comment: CommentRecord): Record<string, unknown> {
+  return {
+    comment_id: comment.commentId,
+    issue: comment.issueKey,
+    author_id: comment.authorId,
+    author_display_name: comment.authorName,
+    actor_kind: comment.actorKind,
+    kind: comment.kind,
+    body: comment.body,
+    resolved: comment.resolved,
+    created_at: comment.createdAt,
+  };
+}
+
+function respondCommentError(error: unknown, response: http.ServerResponse): void {
+  if (error instanceof CommentError) {
+    const status =
+      error.code === "E_UNKNOWN_ISSUE" || error.code === "E_UNKNOWN_COMMENT"
+        ? 404
+        : error.code === "E_COMMENT_NOT_AUTHOR" || error.code === "E_COMMENT_NOT_RESOLVABLE"
+          ? 403
+          : 400;
+    return respondError(response, status, error.code, error.message, error.detail);
   }
   throw error;
 }
