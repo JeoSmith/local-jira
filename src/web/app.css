@@ -294,3 +294,26 @@ form button:disabled { opacity: .55; cursor: wait; }
 /* Was an inline style; the page's own CSP (style-src 'self') blocked it, so the
    margin silently did nothing. A class is the only spelling that applies. */
 .settings-section { margin-top: 22px; }
+
+/* ── 선점과 실행 ─────────────────────────────────────────────────────────── */
+.card-run { gap: 6px; flex-wrap: wrap; }
+.card-claim { padding: 1px 7px; border-radius: 999px; background: #e8eef7; color: #2f4a72;
+  font-size: 11px; font-weight: 600; }
+.card-run-state { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.card-run-state.running { background: #e4f1e8; color: #2f6b46; }
+/* Amber, not red: a stale run still holds a valid claim and may still be
+   working. Red would read as failure (ADR-004 §3). */
+.card-run-state.stale { background: #fbf0d9; color: #8a6d1f; }
+.card-run-state.done { background: #eceff3; color: #4a5568; }
+.card-run-state.done-bare { background: #fbf0d9; color: #8a6d1f; }
+.card-run-state.stopped { background: #f3dede; color: #8a3535; }
+.card-run-by { color: var(--muted); font-size: 11px; }
+
+@media (prefers-color-scheme: dark) {
+  .card-claim { background: #21324a; color: #bcd3f0; }
+  .card-run-state.running { background: #1d3326; color: #a8dcbb; }
+  .card-run-state.stale { background: #33290f; color: #f0d3a8; }
+  .card-run-state.done { background: #2a2f36; color: #b8c2cf; }
+  .card-run-state.done-bare { background: #33290f; color: #f0d3a8; }
+  .card-run-state.stopped { background: #3a2020; color: #f0bcbc; }
+}

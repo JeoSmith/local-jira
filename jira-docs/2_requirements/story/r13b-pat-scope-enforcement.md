@@ -1,6 +1,6 @@
 ---
 title: "PAT 프로젝트 범위·scope 강제"
-status: draft
+status: done
 owner: 이성훈
 created: 2026-07-27
 updated: 2026-07-29
@@ -29,7 +29,7 @@ priority: P0
 - [x] Given `project_scope`가 `LJ`인 PAT, When 다른 프로젝트의 이슈를 조회하거나 변경하면, Then **403**이며 해당 프로젝트 데이터가 응답 본문에 노출되지 않는다.
 - [x] Given `issue:read`가 없는 PAT, When `GET /issues`를 호출하면, Then **403**이다.
 - [x] Given `issue:transition` scope를 가졌지만 해당 이슈에 **본인 claim이 없는** 에이전트, When `IN_PROGRESS`·`IN_REVIEW`·`DONE`으로 전이를 시도하면, Then **403**이다(§6.1 claim↔전이 강제 결합, AC19). scope 보유는 전이 허용의 충분조건이 아니다.
-- [ ] Given 본인 claim을 보유한 에이전트, When 같은 전이를 수행하면, Then 성공하고 타임라인에 `agent` 배지·`run_id`·`initiated_by`가 남는다(AC6).
+- [x] Given 본인 claim을 보유한 에이전트, When 같은 전이를 수행하면, Then 성공하고 타임라인에 `agent` 배지·`run_id`·`initiated_by`가 남는다(AC6).
 - [x] Given `admin`·`member` 역할의 **사람 세션**, When 쓰기 API를 호출하면, Then 허용 여부는 scope가 아니라 역할로 판정된다. 사람은 claim 없이도 전이할 수 있으나, 타인의 유효 claim이 있으면 경고와 강제 여부 확인을 거친다(§6.1).
 - [x] Given scope 검사에서 거부된 요청, When 파일 상태를 확인하면, Then `.localjira/` 아래 어떤 도메인 파일도 변경되지 않는다(거부는 부분 쓰기를 남기지 않는다).
 
