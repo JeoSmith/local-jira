@@ -25,6 +25,9 @@ import {
   endRun, findRun, heartbeatRun, listRunsFor, RunError, startRun, type RunRecord,
 } from "../domain/run.ts";
 import { burndownOf, recordActiveSnapshots, type Snapshot } from "../domain/burndown.ts";
+import {
+  commitsFor, pendingCommits, recordScan, scanCommits, type CommitLink,
+} from "../domain/commits.ts";
 import { RuntimeStore, type Claim } from "../storage/runtime.ts";
 import {
   CredentialStore,
@@ -175,6 +178,18 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
     process.stderr.write(
       `localjira: replayed ${writable.replay.replayed} unfinished write(s) ` +
         `(${writable.replay.rolledForward} rolled forward, ${writable.replay.aborted} abandoned)\n`,
+    );
+  }
+
+  // S5-D2: one scan at startup, and otherwise only when somebody asks. Polling
+  // would have this tool watching a repository it does not own, and a git hook
+  // would have it editing one.
+  const firstScan = await scanCommits(writable).catch(() => null);
+  if (firstScan?.available && (firstScan.linked > 0 || firstScan.pruned > 0)) {
+    await recordScan(writable, firstScan).catch(() => undefined);
+    process.stderr.write(
+      `localjira: linked ${firstScan.linked} commit(s) from trailers` +
+        `${firstScan.pending > 0 ? `, ${firstScan.pending} waiting for an issue` : ""}\n`,
     );
   }
 
@@ -427,6 +442,43 @@ async function handle(
       authed,
     );
   }
+  if (route === "POST /commits/scan") {
+    // `index:rebuild`, not a token scope: reading somebody's code repository is
+    // operating the board, and §6.4's seven do not cover it (S5-D2).
+    return guard(response, authed, "index:rebuild", null, async () => {
+      const result = await scanCommits(authed.writable);
+      if (result.available) {
+        await recordScan(authed.writable, result);
+      }
+      respondJson(response, result.available ? 200 : 503, {
+        available: result.available,
+        reason: result.reason,
+        scanned: result.scanned,
+        linked: result.linked,
+        pending: result.pending,
+        pruned: result.pruned,
+        held: result.held,
+      });
+    });
+  }
+  if (route === "GET /commits/pending") {
+    return guard(response, authed, "issue:read", "issue:read", () => {
+      respondJson(response, 200, { commits: pendingCommits(authed.board).map(commitView) });
+    });
+  }
+  if (request.method === "GET" && url.pathname.endsWith("/commits")) {
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/commits".length));
+    return guard(response, authed, "issue:read", "issue:read", () => {
+      const found = findIssue(authed.board, key);
+      if (!found || !("issue" in found)) {
+        return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
+      }
+      respondJson(response, 200, {
+        commits: commitsFor(authed.board, found.issue.uid).map(commitView),
+      });
+    });
+  }
+
   if (route === "GET /runs") {
     return guard(response, authed, "issue:read", "issue:read", () =>
       listRunsRoute(url, response, authed),
@@ -1464,6 +1516,26 @@ function latestRunBadge(
  */
 async function touchBurndown(context: RequestContext): Promise<void> {
   await recordActiveSnapshots(context.writable, actorOf(context)).catch(() => 0);
+}
+
+/**
+ * A commit as the board shows it.
+ *
+ * Kept apart from a run's own `commits[]` (§5.1): one is what an agent reported
+ * it did, the other is what history says happened, and §5.7 forbids treating a
+ * commit author as an authenticated actor. `source` says which is which.
+ */
+function commitView(link: CommitLink): Record<string, unknown> {
+  return {
+    sha: link.commitSha,
+    short: link.commitSha.slice(0, 7),
+    summary: link.summary,
+    author: link.author,
+    committed_at: link.committedAt,
+    trailer_key: link.trailerKey,
+    issue: link.issueKey,
+    source: "trailer",
+  };
 }
 
 function snapshotView(entry: Snapshot): Record<string, unknown> {

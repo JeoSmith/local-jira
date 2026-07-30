@@ -139,7 +139,11 @@
           </div>
           <button id="detail-close" type="button" class="detail-close" aria-label="닫기">×</button>
         </header>
-        <h3 class="detail-section">에이전트 실행</h3>
+        <h3 class="detail-section">연결된 커밋</h3>
+        <p id="commits-empty" class="column-empty" hidden>트레일러로 연결된 커밋이 없습니다.</p>
+        <ol id="commit-list" class="timeline"></ol>
+
+        <h3 class="detail-section settings-section">에이전트 실행</h3>
         <p id="runs-empty" class="column-empty" hidden>연결된 실행이 없습니다.</p>
         <ol id="run-list" class="timeline"></ol>
 
