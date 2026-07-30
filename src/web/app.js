@@ -637,8 +637,48 @@ async function openDetail(issue) {
   $("#detail-title").textContent = issue.title || "제목 없음";
   $("#timeline").replaceChildren();
   $("#detail").hidden = false;
+  await loadCommits();
   await loadRuns();
   await loadActivity(false);
+}
+
+/**
+ * Commits that named this issue in a trailer.
+ *
+ * Shown apart from a run's own `commits[]`: one is what history says happened,
+ * the other is what an agent reported it did, and §5.7 is explicit that a commit
+ * author is not an authenticated actor. Labelling the source is what keeps the
+ * second from reading as the first.
+ */
+async function loadCommits() {
+  const detail = state.detail;
+  if (!detail) return;
+
+  let payload;
+  try {
+    payload = await api(`/issues/${encodeURIComponent(detail.key)}/commits`);
+  } catch {
+    return;
+  }
+
+  const list = $("#commit-list");
+  list.replaceChildren();
+  $("#commits-empty").hidden = payload.commits.length > 0;
+
+  for (const entry of payload.commits) {
+    const item = element("li");
+    const head = element("div", "entry-head");
+    head.append(element("code", "commit-sha", entry.short));
+    head.append(element("span", "entry-verb", entry.summary || "(제목 없음)"));
+    head.append(element("span", "entry-at", entry.committed_at ? formatAt(entry.committed_at) : ""));
+    item.append(head);
+
+    const who = element("div", "entry-actor");
+    who.append(actorBadge("system"));
+    who.append(element("span", "", `${entry.author || "—"} · 트레일러 ${entry.trailer_key}`));
+    item.append(who);
+    list.append(item);
+  }
 }
 
 /**

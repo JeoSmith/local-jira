@@ -351,3 +351,11 @@ form button:disabled { opacity: .55; cursor: wait; }
   .burndown-done, .burndown-done-dot { stroke: #a8dcbb; fill: #a8dcbb; }
   .burndown-done { fill: none; }
 }
+
+/* ── 연결된 커밋 ─────────────────────────────────────────────────────────── */
+.commit-sha { padding: 1px 6px; border-radius: 5px; background: #eceff3; color: #4a5568;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
+
+@media (prefers-color-scheme: dark) {
+  .commit-sha { background: #2a2f36; color: #b8c2cf; }
+}

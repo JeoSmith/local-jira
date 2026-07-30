@@ -15,7 +15,7 @@
  * Bumping SCHEMA_VERSION discards the index and rebuilds from files. That is
  * always safe: nothing here is a source of truth.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const INDEX_SCHEMA = `
 CREATE TABLE file_state (
@@ -216,6 +216,29 @@ CREATE TABLE index_meta (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
 );
+
+-- S5-D1: commit links live only here. Writing them into issue frontmatter
+-- would make every scan dirty the working tree, and D4 says the service does
+-- not commit — so a person would end up committing changes they did not make.
+-- The file-SoT rule asks that the index be rebuildable, and here the source it
+-- rebuilds from is git history itself: this tool cannot alter it, and rescanning
+-- yields the same links.
+--
+-- issue_uid is null for a trailer naming a key that does not exist yet
+-- (S5-D4). A trailer written before its issue is a plausible order of events,
+-- and dropping it silently would mean it never gets another chance.
+CREATE TABLE issue_commits (
+  commit_sha  TEXT NOT NULL,
+  trailer_key TEXT NOT NULL,
+  issue_uid   TEXT,
+  summary     TEXT,
+  author      TEXT,
+  committed_at TEXT,
+  scanned_at  INTEGER NOT NULL,
+  PRIMARY KEY (commit_sha, trailer_key)
+);
+CREATE INDEX ix_issue_commits_issue ON issue_commits(issue_uid, committed_at DESC);
+CREATE INDEX ix_issue_commits_pending ON issue_commits(trailer_key) WHERE issue_uid IS NULL;
 
 -- S2-D2 (2026-07-29): trigram, decided by measurement on 5,000 Korean issues.
 -- unicode61 splits on whitespace, and Korean attaches particles to the word
