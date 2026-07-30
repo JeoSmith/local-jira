@@ -151,6 +151,15 @@ export class RuntimeStore {
     return Number(changed.changes) > 0;
   }
 
+  /** Claims past their lease, so the caller can record their passing. */
+  expired(now: number = Date.now()): Claim[] {
+    return (
+      this.#db
+        .prepare("SELECT * FROM claims WHERE lease_expires_at <= ?")
+        .all(now) as Array<Record<string, unknown>>
+    ).map(toClaim);
+  }
+
   /**
    * Drops claims whose lease has run out.
    *

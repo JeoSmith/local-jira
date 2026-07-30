@@ -1,9 +1,9 @@
 ---
 title: "AgentRun 종료 시 구조화 결과 제출"
-status: draft
+status: done
 owner: 이성훈
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-30
 related_prd: ../prd/backlog-sprint.md
 requirement: R17
 milestone: M3
@@ -22,22 +22,30 @@ priority: P0
 
 ## 인수 조건 (Acceptance Criteria)
 
-- [ ] Given run 종료 요청, When 페이로드를 확인하면, Then **결과 요약 · 검증 방법과 통과 여부 · 변경 파일 · 커밋 해시 · 잔여 위험** 다섯 항목이 구조화 필드로 포함된다(§6.2).
-- [ ] Given 위 항목 중 하나라도 누락한 종료 요청, When 처리하면, Then **400**으로 거부되고 run은 종료되지 않는다.
-- [ ] Given 결과 전체를 자유 텍스트 한 필드로 보낸 종료 요청, When 처리하면, Then **400**이다. 결과는 `result` 하위의 개별 필드로 저장된다(§5.1 AgentRun `result`).
-- [ ] Given 검증을 수행하지 않은 run, When 종료하면, Then "검증 방법" 필드에 그 사실이 명시적으로 담기며 필드 자체를 생략할 수는 없다.
-- [ ] Given 종료된 run, When `.localjira/runs/<PROJECT>/<YYYY-MM>/<ULID>.json`을 확인하면, Then 제출된 결과가 파일에 저장되어 있고 `.local/index.sqlite` 삭제·재기동 후에도 동일하게 조회된다(§5.3, AC2).
-- [ ] Given `run:write` scope가 없는 PAT, When 결과 제출을 시도하면, Then **403**이다(§6.4).
-- [ ] Given 사람이 이미 강제 해제·취소한 run, When 그 run이 결과를 제출하면, Then **409**이며 결과가 저장되지 않는다(§6.1, AC20).
-- [ ] Given 결과 제출과 함께 `IN_REVIEW`로 전이하는 에이전트, When 본인 claim이 유효하면, Then 전이가 성공한다(S3). 본인 claim이 없으면 **403**이다(§6.1, AC19).
-- [ ] Given 이슈 상세 화면, When 연결된 AgentRun을 펼치면, Then 다섯 항목이 각각 구분되어 표시되고 실행 주체·지시 주체가 함께 보인다(§8, §6.2).
-- [ ] Given `STALE`로 끝나 결과를 제출하지 못한 run, When 화면을 보면, Then 결과 미제출 상태가 정상 종료와 **구분되어** 표시된다(S5, AC20).
-- [ ] Given 결과 제출 이벤트, When 이벤트를 확인하면, Then `actor_kind=agent`·`run_id`·`initiated_by`와 함께 기록된다(AC6, N7 — run은 감사 범위).
-- [ ] Given 같은 `Idempotency-Key`로 종료 요청을 재전송, When 처리하면, Then 최초 응답이 반환되고 결과가 중복 기록되지 않는다(§5.4, AC18).
+- [x] Given run 종료 요청, When 페이로드를 확인하면, Then **결과 요약 · 검증 방법과 통과 여부 · 변경 파일 · 커밋 해시 · 잔여 위험** 다섯 항목이 구조화 필드로 포함된다(§6.2).
+- [x] Given 위 항목 중 하나라도 누락한 종료 요청, When 처리하면, Then **400**으로 거부되고 run은 종료되지 않는다.
+- [x] Given 결과 전체를 자유 텍스트 한 필드로 보낸 종료 요청, When 처리하면, Then **400**이다. 결과는 `result` 하위의 개별 필드로 저장된다(§5.1 AgentRun `result`).
+- [x] Given 검증을 수행하지 않은 run, When 종료하면, Then "검증 방법" 필드에 그 사실이 명시적으로 담기며 필드 자체를 생략할 수는 없다.
+- [x] Given 종료된 run, When `.localjira/runs/<PROJECT>/<YYYY-MM>/<ULID>.json`을 확인하면, Then 제출된 결과가 파일에 저장되어 있고 `.local/index.sqlite` 삭제·재기동 후에도 동일하게 조회된다(§5.3, AC2).
+- [x] Given `run:write` scope가 없는 PAT, When 결과 제출을 시도하면, Then **403**이다(§6.4).
+- [x] Given 사람이 이미 강제 해제·취소한 run, When 그 run이 결과를 제출하면, Then **409**이며 결과가 저장되지 않는다(§6.1, AC20).
+- [x] Given 결과 제출과 함께 `IN_REVIEW`로 전이하는 에이전트, When 본인 claim이 유효하면, Then 전이가 성공한다(S3). 본인 claim이 없으면 **403**이다(§6.1, AC19).
+- [x] Given 이슈 상세 화면, When 연결된 AgentRun을 펼치면, Then 다섯 항목이 각각 구분되어 표시되고 실행 주체·지시 주체가 함께 보인다(§8, §6.2).
+- [x] Given `STALE`로 끝나 결과를 제출하지 못한 run, When 화면을 보면, Then 결과 미제출 상태가 정상 종료와 **구분되어** 표시된다(S5, AC20).
+- [x] Given 결과 제출 이벤트, When 이벤트를 확인하면, Then `actor_kind=agent`·`run_id`·`initiated_by`와 함께 기록된다(AC6, N7 — run은 감사 범위).
+- [x] Given 같은 `Idempotency-Key`로 종료 요청을 재전송, When 처리하면, Then 최초 응답이 반환되고 결과가 중복 기록되지 않는다(§5.4, AC18).
 
-> ⚠ 미정: "검증 통과 여부"의 값 형식 — 불리언인지 `passed/failed/skipped` 같은 열거인지 PRD 미규정.
-> ⚠ 미정: 제출된 커밋 해시를 실제 저장소에서 **존재 검증**하는지 여부 — PRD는 기록만 요구하며, 커밋 연결 자동화는 R23(P2/M5)이다.
-> ⚠ 미정: 제출된 결과의 **사후 수정** 가능 여부와 그 주체 — 코멘트와 달리 run 결과에는 후속 op 모델이 규정되어 있지 않다.
+> 결정됨(S3-D6): 검증 결과는 불리언이 아니라 `passed`·`failed`·`skipped` 열거다. 불리언에는
+> "확인하지 않았다"가 들어갈 자리가 없는데 AC4가 그 사실을 명시하라고 요구한다. `skipped`일
+> 때도 `method`는 필수다 — 검증하지 않은 이유를 적는 자리다.
+> 결정됨(S3-D6): 커밋 해시는 기록만 하고 저장소에서 존재를 검증하지 않는다. 커밋 연결
+> 자동화는 R23(M5)이다.
+> 결정됨(S3-D6): 제출된 결과는 불변이다. 나중에 고칠 수 있으면 "그때 그 실행이 무엇을 했다고
+> 보고했는가"의 기록이 증거로서 쓸모가 없다. 정정은 이슈 코멘트로 남긴다.
+>
+> 구현 메모: `FAILED`도 다섯 필드를 요구한다. "실패했습니다" 한 줄은 실패판 "다 했습니다"이고,
+> 실패를 말할 만큼 살아 있는 run은 무엇을 시도했는지도 말할 수 있다. 결과 없이 끝나는 경우는
+> 밖에서 취소된 run(강제 해제·취소)뿐이며, 그것이 AC10이 구분하라는 상태다.
 
 ## 범위 밖 (Out of Scope)
 

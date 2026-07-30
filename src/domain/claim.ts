@@ -139,6 +139,81 @@ export async function claimIssue(
 }
 
 /**
+ * Takes a claim away from whoever holds it, and ends the run that held it.
+ *
+ * Ending the run is not a separate courtesy: AC20 requires that a released
+ * run's later writes are refused, and leaving it RUNNING would let it keep
+ * transitioning the issue it no longer holds. Cancelling it is what makes the
+ * refusal true rather than a rule somebody has to remember to check.
+ *
+ * The issue's own status is left alone on purpose (ADR-004 §3). Whatever
+ * progress was made was real, and deciding what to do about it is the person's
+ * call — the same person who just intervened.
+ */
+export async function releaseClaim(
+  writable: WritableBoard,
+  runtime: RuntimeStore,
+  key: string,
+  actor: Actor,
+  reason: string | null,
+  endRunAs: (runId: string, state: "CANCELLED") => Promise<void>,
+): Promise<{ released: boolean; runId: string | null }> {
+  const board = writable.board;
+
+  const found = findIssue(board, key);
+  if (!found || !("issue" in found)) {
+    throw new ClaimError("E_UNKNOWN_ISSUE", `No issue ${key}.`);
+  }
+
+  const held = runtime.find(found.issue.uid);
+  if (held === null) {
+    return { released: false, runId: null };
+  }
+
+  runtime.release(found.issue.uid);
+  await endRunAs(held.runId, "CANCELLED");
+  await record(writable, "claim.released", found.issue.uid, actor, null, {
+    issue: key,
+    owner_id: held.ownerId,
+    run_id: held.runId,
+    // AC20 wants the reason and the person, because a forced release is an
+    // intervention and the agent's operator has to be able to find out why.
+    reason,
+    forced: true,
+  });
+
+  return { released: true, runId: held.runId };
+}
+
+/**
+ * Records the passing of claims whose lease ran out.
+ *
+ * `actor_kind=system`: nobody decided this, the clock did. Attributing it to
+ * whoever happened to make the next request would put an action on their name
+ * that they did not take (§5.1).
+ */
+export async function recordExpiredClaims(
+  writable: WritableBoard,
+  runtime: RuntimeStore,
+  now: number = Date.now(),
+): Promise<number> {
+  const gone = runtime.expired(now);
+  for (const claim of gone) {
+    await record(
+      writable,
+      "claim.reclaimed",
+      claim.issueUid,
+      { id: "system", kind: "human" },
+      null,
+      { owner_id: claim.ownerId, run_id: claim.runId, reason: "lease expired" },
+      "system",
+    );
+  }
+  runtime.reclaimExpired(now);
+  return gone.length;
+}
+
+/**
  * Whether this actor may make a claim-gated transition on this issue.
  *
  * The one place that answers it, so the HTTP gate and any future caller cannot
@@ -186,6 +261,7 @@ async function record(
   actor: Actor,
   run: RunRecord | null,
   after: Record<string, unknown>,
+  kind: "human" | "agent" | "system" = actor.kind,
 ): Promise<void> {
   const board = writable.board;
   const event = buildEvent(board.localDirectory, {
@@ -194,6 +270,7 @@ async function record(
     targetUid: issueUid,
     actor: {
       ...actor,
+      kind,
       runId: run?.runId ?? null,
       initiatedBy: run?.initiatedBy ?? null,
     },
@@ -210,6 +287,6 @@ async function record(
     contents: null,
     event,
     actorId: actor.id,
-    actorKind: actor.kind,
+    actorKind: kind,
   });
 }

@@ -202,11 +202,80 @@ export interface EndRunInput {
   result?: JsonValue | null;
 }
 
+/** How a verification turned out (S3-D6). */
+export const VERIFICATION_OUTCOMES = ["passed", "failed", "skipped"] as const;
+
+/**
+ * Checks the five fields §6.2 requires when a run reports.
+ *
+ * Refused as a whole rather than stored partially: the point of the five is
+ * that "다 했습니다" is not an answer, and a result missing its verification is
+ * that sentence with more words. `skipped` exists so that not verifying is
+ * something a run has to say, not something it can leave out — which is why
+ * `method` is still required alongside it (r17b AC4).
+ */
+export function validateResult(value: unknown): JsonValue {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new RunError(
+      "E_RESULT_SHAPE",
+      "A result is five fields, not one block of prose.",
+      "summary, verification{method,outcome}, files_changed[], commits[], remaining_risks",
+    );
+  }
+  const row = value as Record<string, unknown>;
+
+  const summary = text(row.summary, "summary");
+  const risks = text(row.remaining_risks, "remaining_risks");
+  const files = strings(row.files_changed, "files_changed");
+  const commits = strings(row.commits, "commits");
+
+  const verification = row.verification;
+  if (typeof verification !== "object" || verification === null || Array.isArray(verification)) {
+    throw new RunError("E_RESULT_FIELD_MISSING", "verification is required.");
+  }
+  const check = verification as Record<string, unknown>;
+  const outcome = String(check.outcome ?? "");
+  if (!(VERIFICATION_OUTCOMES as readonly string[]).includes(outcome)) {
+    throw new RunError(
+      "E_RESULT_FIELD_MISSING",
+      `verification.outcome must be one of ${VERIFICATION_OUTCOMES.join(", ")}.`,
+      // A boolean has no room for "I did not check", and a run that skipped
+      // verification has to be able to say so rather than claim failure.
+      "Use `skipped` when nothing was verified.",
+    );
+  }
+  const method = text(check.method, "verification.method");
+
+  return {
+    summary,
+    verification: { method, outcome },
+    files_changed: files,
+    commits,
+    remaining_risks: risks,
+  };
+}
+
+function text(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new RunError("E_RESULT_FIELD_MISSING", `${field} is required.`);
+  }
+  return value;
+}
+
+function strings(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new RunError("E_RESULT_FIELD_MISSING", `${field} must be a list, even an empty one.`);
+  }
+  return value.map(String);
+}
+
 export async function endRun(
   writable: WritableBoard,
   runId: string,
   input: EndRunInput,
   actor: Actor,
+  /** A person taking a run away does not own it (r16b, AC20). */
+  onBehalfOfBoard = false,
 ): Promise<RunRecord> {
   const board = writable.board;
   const run = requireRun(board, runId);
@@ -214,7 +283,14 @@ export async function endRun(
   if (run.state !== "RUNNING") {
     throw new RunError("E_RUN_NOT_RUNNING", `${runId} is already ${run.state}.`);
   }
-  requireOwner(run, actor);
+  if (!onBehalfOfBoard) {
+    requireOwner(run, actor);
+  }
+
+  // Only a run that finished has something to report. A cancelled one was
+  // stopped from outside and never got to look at what it had done.
+  const result =
+    input.state === "CANCELLED" ? null : validateResult(input.result ?? undefined);
 
   const now = timestamp(projectTimezone(board, projectOfRun(board, run)));
   await rewriteRun(
@@ -223,7 +299,7 @@ export async function endRun(
     {
       state: input.state,
       ended_at: now,
-      ...(input.result === undefined || input.result === null ? {} : { result: input.result }),
+      ...(result === null ? {} : { result }),
     },
     actor,
     {

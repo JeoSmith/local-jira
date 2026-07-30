@@ -317,3 +317,16 @@ form button:disabled { opacity: .55; cursor: wait; }
   .card-run-state.done-bare { background: #33290f; color: #f0d3a8; }
   .card-run-state.stopped { background: #3a2020; color: #f0bcbc; }
 }
+
+/* ── 실행 결과 ───────────────────────────────────────────────────────────── */
+.run-result { margin-top: 7px; padding: 9px 11px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--card); display: flex; flex-direction: column; gap: 5px; }
+.run-field { display: flex; gap: 8px; font-size: 12px; }
+.run-field-label { flex: 0 0 68px; color: var(--muted); font-weight: 600; }
+/* Amber like the stale badge: both mean "look at this one", not "this failed". */
+.run-no-result { margin-top: 7px; padding: 7px 11px; border-radius: 7px;
+  background: #fbf0d9; color: #8a6d1f; font-size: 12px; font-weight: 600; }
+
+@media (prefers-color-scheme: dark) {
+  .run-no-result { background: #33290f; color: #f0d3a8; }
+}
