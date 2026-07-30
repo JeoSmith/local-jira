@@ -637,7 +637,76 @@ async function openDetail(issue) {
   $("#detail-title").textContent = issue.title || "제목 없음";
   $("#timeline").replaceChildren();
   $("#detail").hidden = false;
+  await loadRuns();
   await loadActivity(false);
+}
+
+/**
+ * The runs on this issue, newest first, with the five fields opened out.
+ *
+ * Each field on its own line rather than one paragraph: the whole reason §6.2
+ * asks for five is that a person reviewing the work can look at what was
+ * verified without reading past a summary that says it went fine.
+ */
+async function loadRuns() {
+  const detail = state.detail;
+  if (!detail) return;
+
+  let payload;
+  try {
+    payload = await api(`/runs?issue=${encodeURIComponent(detail.key)}`);
+  } catch {
+    return;
+  }
+
+  const list = $("#run-list");
+  list.replaceChildren();
+  $("#runs-empty").hidden = payload.runs.length > 0;
+
+  for (const run of payload.runs) {
+    const item = element("li");
+    const head = element("div", "entry-head");
+    head.append(element("span", `card-run-state ${runClass(run)}`, runLabel(run)));
+    head.append(element("span", "entry-verb", run.agent_id || "에이전트"));
+    head.append(element("span", "entry-at", run.started_at ? formatAt(run.started_at) : ""));
+    item.append(head);
+
+    // §6.2 delegation, and §8's rule that an agent's work must not read as a
+    // person's: both names, every time.
+    const who = element("div", "entry-actor");
+    who.append(actorBadge("agent"));
+    who.append(element("span", "", `지시 ${run.initiated_by || "—"} · 브랜치 ${run.branch || "—"}`));
+    item.append(who);
+
+    if (run.result) {
+      item.append(resultBlock(run.result));
+    } else if (run.state !== "RUNNING") {
+      // Told apart from a finished report, or the runs worth looking at are
+      // indistinguishable from the ones that went fine (AC10).
+      item.append(element("div", "run-no-result", "결과 미제출로 종료됨"));
+    }
+    list.append(item);
+  }
+}
+
+function resultBlock(result) {
+  const box = element("div", "run-result");
+  const row = (label, value) => {
+    const line = element("div", "run-field");
+    line.append(element("span", "run-field-label", label));
+    line.append(element("span", "", value));
+    box.append(line);
+  };
+
+  row("요약", result.summary || "—");
+  const check = result.verification || {};
+  const outcome = { passed: "통과", failed: "실패", skipped: "수행 안 함" }[check.outcome]
+    || check.outcome || "—";
+  row("검증", `${outcome} · ${check.method || "—"}`);
+  row("변경 파일", result.files_changed?.length ? result.files_changed.join(", ") : "없음");
+  row("커밋", result.commits?.length ? result.commits.join(", ") : "없음");
+  row("잔여 위험", result.remaining_risks || "—");
+  return box;
 }
 
 function closeDetail() {

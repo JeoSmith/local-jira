@@ -14,7 +14,9 @@ import {
   type Capability,
   type TokenScope,
 } from "../auth/authorize.ts";
-import { claimIssue, ClaimError, holdsClaimOn } from "../domain/claim.ts";
+import {
+  claimIssue, ClaimError, holdsClaimOn, recordExpiredClaims, releaseClaim,
+} from "../domain/claim.ts";
 import {
   endRun, findRun, heartbeatRun, listRunsFor, RunError, startRun, type RunRecord,
 } from "../domain/run.ts";
@@ -144,7 +146,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   // server restarting must not cost a working agent its place, and a lease that
   // ran out while nothing was watching must not survive as a ghost.
   const runtime = new RuntimeStore(board.localDirectory);
-  const reclaimed = runtime.reclaimExpired();
+  const reclaimed = await recordExpiredClaims(writable, runtime);
   if (reclaimed > 0) {
     process.stderr.write(`localjira: reclaimed ${reclaimed} expired claim(s)\n`);
   }
@@ -475,6 +477,12 @@ async function handle(
       withIdempotency(request, response, authed, (idempotency) =>
         createIssueRoute(request, response, authed, idempotency),
       ),
+    );
+  }
+  if (request.method === "DELETE" && url.pathname.endsWith("/claim")) {
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/claim".length));
+    return guard(response, authed, "claim:release", null, () =>
+      releaseClaimRoute(key, request, response, authed),
     );
   }
   if (request.method === "POST" && url.pathname.endsWith("/claim")) {
@@ -1266,6 +1274,46 @@ function listRunsRoute(
   });
 }
 
+/**
+ * A person taking a claim back.
+ *
+ * `claim:release`, which `member` and `admin` hold and `agent` does not: D7
+ * gives people the last word, and an agent releasing another agent's claim
+ * would be the two of them arguing with no referee.
+ */
+async function releaseClaimRoute(
+  key: string,
+  request: http.IncomingMessage,
+  response: http.ServerResponse,
+  context: RequestContext,
+): Promise<void> {
+  const body = await readJson(request);
+  try {
+    const result = await releaseClaim(
+      context.writable,
+      context.runtime,
+      key,
+      actorOf(context),
+      typeof body.reason === "string" && body.reason.trim() !== "" ? body.reason : null,
+      async (runId) => {
+        // Cancelled, not left running: AC20 wants the released run's later
+        // writes refused, and the run's own state is what refuses them.
+        await endRun(context.writable, runId, { state: "CANCELLED" }, actorOf(context), true);
+      },
+    );
+    respondJson(response, 200, { released: result.released, run_id: result.runId });
+  } catch (error) {
+    if (error instanceof ClaimError) {
+      return respondError(
+        response,
+        error.code === "E_UNKNOWN_ISSUE" ? 404 : 409,
+        error.code, error.message, error.detail, error.extra,
+      );
+    }
+    return respondRunError(error, response);
+  }
+}
+
 async function claimRoute(
   key: string,
   request: http.IncomingMessage,
@@ -1310,6 +1358,11 @@ function runView(run: RunRecord): Record<string, unknown> {
     last_heartbeat_at: run.lastHeartbeatAt,
     ended_at: run.endedAt,
     result: run.result,
+    // Beside `result` rather than left for the client to infer, so the card
+    // badge and the detail panel answer "did it report?" the same way. They did
+    // not: only the card carried this, and a run that had reported showed as
+    // one that had not.
+    has_result: run.result !== null,
   };
 }
 
