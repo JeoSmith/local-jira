@@ -885,3 +885,32 @@ test("reading a context records nothing", async (t) => {
   // loudest writer on the board.
   assert.equal(count(), before);
 });
+
+
+// ── 격리가 새 이슈를 막지 않는다 (r01d 중 발견) ────────────────────────────
+
+test("a broken file does not stop the board minting new keys", async (t) => {
+  const s = await session(t);
+  const broken = await anIssue(s, "곧 깨질 이슈");
+
+  fs.appendFileSync(
+    path.join(s.board, "issues", "LJ", `${broken}.md`),
+    "\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> z\n",
+  );
+  await call(s, "POST", "/index/rebuild", { cookie: s.admin });
+
+  // A full rebuild leaves no `issues` row for a file that never parsed, so the
+  // key allocator could not see that LJ-1 was taken and handed it out again —
+  // the file-exists guard then refused *every* new issue until somebody
+  // repaired that one file. One broken document must not stop the board.
+  const created = await call(s, "POST", "/issues", {
+    cookie: s.admin, body: { project: "LJ", type: "task", title: "그래도 만들어진다" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  assert.notEqual(created.json.key, broken);
+
+  // And the broken one is still there, still quarantined, not overwritten.
+  const held = await call(s, "GET", `/issues/${broken}`, { cookie: s.admin });
+  assert.equal(held.status, 409);
+  assert.equal(held.json.error?.code, "E_ISSUE_QUARANTINED");
+});

@@ -94,6 +94,41 @@
         <p id="board-hint" class="sr-only">카드에 포커스를 두고 왼쪽·오른쪽 화살표로 컬럼을 옮기고, 위·아래 화살표로 순서를 바꿉니다.</p>
       </section>
 
+      <div id="edit-backdrop" class="palette-backdrop" hidden>
+        <form id="edit-form" class="palette create-form" aria-label="이슈 수정">
+          <h2 class="detail-section"><span id="edit-key"></span> 수정</h2>
+          <div class="create-row">
+            <label for="edit-points">포인트</label>
+            <input id="edit-points" type="number" min="0" step="1" inputmode="numeric" />
+          </div>
+          <label for="edit-title">제목</label>
+          <input id="edit-title" type="text" maxlength="200" />
+          <label for="edit-description">설명</label>
+          <textarea id="edit-description" rows="3"></textarea>
+          <label for="edit-labels">라벨 (쉼표로 구분)</label>
+          <input id="edit-labels" type="text" />
+          <label for="edit-acceptance">인수조건 (한 줄에 하나)</label>
+          <textarea id="edit-acceptance" rows="3"></textarea>
+          <p id="edit-error" class="form-error" role="alert" hidden></p>
+
+          <section id="edit-conflict" class="edit-conflict" hidden aria-label="변경 충돌">
+            <p class="edit-conflict-lead">
+              폼을 열어 둔 사이 다른 곳에서 이 이슈가 바뀌었습니다. 어느 쪽으로 갈지 고르세요.
+            </p>
+            <dl id="edit-conflict-fields" class="index-facts"></dl>
+            <div class="create-actions">
+              <button type="button" id="edit-reload" class="ghost-button">최신 값 불러오기</button>
+              <button type="button" id="edit-force">내 값으로 덮어쓰기</button>
+            </div>
+          </section>
+
+          <div class="create-actions">
+            <button type="button" id="edit-cancel" class="ghost-button">취소</button>
+            <button type="submit" id="edit-submit">저장</button>
+          </div>
+        </form>
+      </div>
+
       <div id="create-backdrop" class="palette-backdrop" hidden>
         <form id="create-form" class="palette create-form" aria-label="새 이슈">
           <h2 class="detail-section">새 이슈</h2>
@@ -191,7 +226,10 @@
             <span id="detail-key" class="issue-key"></span>
             <h2 id="detail-title"></h2>
           </div>
-          <button id="detail-close" type="button" class="detail-close" aria-label="닫기">×</button>
+          <div class="detail-actions">
+            <button id="detail-edit" type="button" class="ghost-button" hidden>수정</button>
+            <button id="detail-close" type="button" class="detail-close" aria-label="닫기">×</button>
+          </div>
         </header>
         <h3 class="detail-section">연결된 커밋</h3>
         <p id="commits-empty" class="column-empty" hidden>트레일러로 연결된 커밋이 없습니다.</p>
