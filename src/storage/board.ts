@@ -492,6 +492,32 @@ export function findIssue(
   return null;
 }
 
+/**
+ * Quarantined files that also claim this key.
+ *
+ * `findIssue` answers with the one readable claimant, which is the only answer
+ * it can give — a file the parser rejected cannot be served. But when a broken
+ * file holds the same key, that answer is one issue among two and saying so is
+ * the difference between "here is LJ-2" and "here is the LJ-2 we can read".
+ *
+ * Reachable two ways: a row still marked INVALID from before the file broke,
+ * and, after a full rebuild, only the error log — a file that never parsed
+ * leaves no row at all. Both are asked, because which one exists depends on
+ * whether anybody happened to rebuild.
+ */
+export function contestedBy(board: BoardHandle, key: string): string[] {
+  const rows = board.db
+    .prepare("SELECT path FROM issues WHERE key = ? AND state = 'INVALID'")
+    .all(key) as Array<{ path: string }>;
+
+  const project = /^([^-]+)-/.exec(key)?.[1] ?? "";
+  const orphans = board.db
+    .prepare("SELECT path FROM index_errors WHERE path = ?")
+    .all(`issues/${project}/${key}.md`) as Array<{ path: string }>;
+
+  return [...new Set([...rows, ...orphans].map((row) => row.path))].sort();
+}
+
 function toDetail(
   board: BoardHandle,
   row: Record<string, string | number | null>,

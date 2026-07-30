@@ -88,6 +88,7 @@ import {
 import { RankSpaceExhausted } from "../domain/rank.ts";
 import { canonicalJson, type JsonValue } from "../storage/jcs.ts";
 import {
+  contestedBy,
   findIssue,
   indexStatus,
   listIssues,
@@ -1235,7 +1236,12 @@ async function createIssueRoute(
     if (error instanceof IssueError) {
       return respondError(response, 400, error.code, error.message, error.detail);
     }
-    throw error;
+    // Naming a quarantined parent is a refusable request, not a broken server.
+    // `createIssue` calls `refuseIfTargetQuarantined`, which throws a
+    // QuarantinedError this catch used to let through to the 500 handler — so
+    // the one answer that says which file to repair was replaced by "internal
+    // error". The link route next door already handled it; this one did not.
+    return handleWriteError(error, response);
   }
 }
 
@@ -1765,6 +1771,11 @@ function contextRoute(
   // there — the board just cannot vouch for it. An agent handed a plausible
   // context assembled from a document nobody could parse carries on into a
   // broken issue; one told the truth stops.
+  //
+  // This also covers a key two files claim, one of them broken. The detail
+  // route serves the readable one with `X-Key-Contested-By` so a person can
+  // look and decide; an agent gets nothing to act on, because acting on the
+  // wrong issue is the failure this is guarding.
   try {
     refuseIfQuarantined(context.board, key);
   } catch (error) {
@@ -3178,6 +3189,15 @@ function showIssueRoute(
       "X-Unanswered-Comments",
       unanswered.map((comment) => comment.commentId).join(","),
     );
+  }
+
+  // A key with two claimants, one of them unreadable. The body is the readable
+  // one — it is the only one that can be served — but saying nothing would make
+  // "here is LJ-2" out of "here is the LJ-2 we can read", and a link or a
+  // trailer written against that key may have meant the other file.
+  const contested = contestedBy(context.board, found.issue.key);
+  if (contested.length > 0) {
+    response.setHeader("X-Key-Contested-By", contested.join(","));
   }
 
   // Headers for the same reason as the two above: a claim is runtime state that

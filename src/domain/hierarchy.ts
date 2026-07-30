@@ -1,3 +1,4 @@
+import { unindexedHint } from "./links.ts";
 import type { BoardHandle } from "../storage/board.ts";
 import { ISSUE_TYPES, IssueError, type IssueType } from "./issue.ts";
 
@@ -63,6 +64,7 @@ export function validateParent(
     throw new IssueError(
       "E_PARENT_NOT_FOUND",
       `No issue with uid ${parentUid} to use as a parent.`,
+      unindexedHint(board),
     );
   }
 
