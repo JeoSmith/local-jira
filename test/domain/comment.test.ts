@@ -490,3 +490,398 @@ test("adding and resolving are both on the record, with the actor kind", async (
   assert.equal(added.actor_kind, "agent");
   assert.equal(resolved.actor_kind, "human");
 });
+
+// ── gating (r19b) ───────────────────────────────────────────────────────────
+
+async function refined(s: Session, title = "정제된 일"): Promise<string> {
+  const key = await anIssue(s, title);
+  const current = await call(s, "GET", `/issues/${key}`, { cookie: s.admin });
+  const moved = await call(s, "POST", `/issues/${key}/transitions`, {
+    cookie: s.admin, etag: current.etag ?? undefined, body: { to: "TODO" },
+  });
+  assert.equal(moved.status, 200, JSON.stringify(moved.json));
+  return key;
+}
+
+async function runFor(s: Session, issue: string): Promise<string> {
+  const started = await call(s, "POST", "/runs", {
+    bearer: s.bot,
+    body: {
+      issue, session_id: "s", agent_id: "bot", initiated_by: "root", branch: "b",
+    },
+  });
+  assert.equal(started.status, 201, JSON.stringify(started.json));
+  return started.json.run_id as unknown as string;
+}
+
+test("an unanswered question stops an agent picking the issue up", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  const asked = await comment(s, key, "이 방향이 맞나요?", "question");
+  const runId = await runFor(s, key);
+
+  const refused = await call(s, "POST", `/issues/${key}/claim`, {
+    bearer: s.bot, body: { run_id: runId },
+  });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.json.error?.code, "E_CLAIM_UNANSWERED");
+  // The agent has to be able to say what is in the way, and to whom.
+  assert.equal(
+    (refused.json.unresolved_comments as unknown as Array<{ comment_id: string }>)[0].comment_id,
+    asked,
+  );
+
+  // AC22: answered, and it moves.
+  await call(s, "POST", `/comments/${asked}/ops`, { cookie: s.admin, body: { op: "resolve" } });
+  const taken = await call(s, "POST", `/issues/${key}/claim`, {
+    bearer: s.bot, body: { run_id: runId },
+  });
+  assert.equal(taken.status, 200, JSON.stringify(taken.json));
+});
+
+test("a review request gates too, and general and decision do not", async (t) => {
+  const s = await session(t);
+
+  const review = await refined(s, "리뷰 요청이 걸린 일");
+  await comment(s, review, "봐 주세요", "review_request");
+  const blocked = await call(s, "POST", `/issues/${review}/claim`, {
+    bearer: s.bot, body: { run_id: await runFor(s, review) },
+  });
+  assert.equal(blocked.status, 409);
+
+  // §6.3 names exactly two kinds. Gating on the others would make every note
+  // a stop sign.
+  const chatty = await refined(s, "말만 많은 일");
+  await comment(s, chatty, "고생하셨습니다", "general");
+  await comment(s, chatty, "이렇게 가기로 했습니다", "decision");
+  const fine = await call(s, "POST", `/issues/${chatty}/claim`, {
+    bearer: s.bot, body: { run_id: await runFor(s, chatty) },
+  });
+  assert.equal(fine.status, 200, JSON.stringify(fine.json));
+});
+
+test("unresolving blocks again, and deleting stops blocking", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  const asked = await comment(s, key, "질문", "question");
+  const runId = await runFor(s, key);
+
+  await call(s, "POST", `/comments/${asked}/ops`, { cookie: s.admin, body: { op: "resolve" } });
+  assert.equal(
+    (await call(s, "POST", `/issues/${key}/claim`, { bearer: s.bot, body: { run_id: runId } }))
+      .status,
+    200,
+  );
+  await call(s, "DELETE", `/issues/${key}/claim`, { cookie: s.admin });
+
+  // The gate reads the replayed state, not a stored flag, so reopening the
+  // question closes it again.
+  await call(s, "POST", `/comments/${asked}/ops`, { cookie: s.admin, body: { op: "unresolve" } });
+  const again = await runFor(s, key);
+  assert.equal(
+    (await call(s, "POST", `/issues/${key}/claim`, { bearer: s.bot, body: { run_id: again } }))
+      .status,
+    409,
+  );
+
+  // A withdrawn question is not an unanswered one.
+  await call(s, "POST", `/comments/${asked}/ops`, { cookie: s.admin, body: { op: "delete" } });
+  const third = await runFor(s, key);
+  assert.equal(
+    (await call(s, "POST", `/issues/${key}/claim`, { bearer: s.bot, body: { run_id: third } }))
+      .status,
+    200,
+  );
+});
+
+test("an unanswered question stops DONE, for an agent", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  const runId = await runFor(s, key);
+  await call(s, "POST", `/issues/${key}/claim`, { bearer: s.bot, body: { run_id: runId } });
+
+  for (const to of ["IN_PROGRESS", "IN_REVIEW"]) {
+    const current = await call(s, "GET", `/issues/${key}`, { bearer: s.bot });
+    const moved = await call(s, "POST", `/issues/${key}/transitions`, {
+      bearer: s.bot, etag: current.etag ?? undefined, body: { to },
+    });
+    assert.equal(moved.status, 200, `${to}: ${JSON.stringify(moved.json)}`);
+  }
+
+  // Asked after the work started, which is the case §6.3 is about.
+  const asked = await comment(s, key, "이대로 끝내도 되나요?", "question");
+
+  const current = await call(s, "GET", `/issues/${key}`, { bearer: s.bot });
+  const refused = await call(s, "POST", `/issues/${key}/transitions`, {
+    bearer: s.bot, etag: current.etag ?? undefined, body: { to: "DONE" },
+  });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.json.error?.code, "E_DONE_UNANSWERED");
+
+  // §6.3 blocks claim and DONE, and nothing between them.
+  await call(s, "POST", `/comments/${asked}/ops`, { cookie: s.admin, body: { op: "resolve" } });
+  const after = await call(s, "GET", `/issues/${key}`, { bearer: s.bot });
+  const done = await call(s, "POST", `/issues/${key}/transitions`, {
+    bearer: s.bot, etag: after.etag ?? undefined, body: { to: "DONE" },
+  });
+  assert.equal(done.status, 200, JSON.stringify(done.json));
+});
+
+test("a person is not locked out by a question only they can answer", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  await comment(s, key, "이거 맞나요?", "question");
+
+  // S4-D4 reads §6.3 the way §6.1 reads people. Blocking here would mean the
+  // only way out of your own board is answering your own question.
+  for (const to of ["IN_PROGRESS", "IN_REVIEW", "DONE"]) {
+    const current = await call(s, "GET", `/issues/${key}`, { cookie: s.admin });
+    const moved = await call(s, "POST", `/issues/${key}/transitions`, {
+      cookie: s.admin, etag: current.etag ?? undefined, body: { to },
+    });
+    assert.equal(moved.status, 200, `${to}: ${JSON.stringify(moved.json)}`);
+  }
+});
+
+test("the two ways of being blocked are told apart", async (t) => {
+  const s = await session(t);
+  const waiting = await refined(s, "선행 대기");
+  const asked = await refined(s, "질문 대기");
+  const blocker = await refined(s, "선행");
+
+  const detail = await call(s, "GET", `/issues/${waiting}`, { cookie: s.admin });
+  const blockerDetail = await call(s, "GET", `/issues/${blocker}`, { cookie: s.admin });
+  await call(s, "POST", `/issues/${waiting}/links`, {
+    cookie: s.admin, etag: detail.etag ?? undefined,
+    body: { kind: "blocked_by", to: blockerDetail.json.uid },
+  });
+  await comment(s, asked, "질문", "question");
+
+  const first = await fetch(`${s.server.url}/issues/${waiting}`, { headers: { cookie: s.admin } });
+  const second = await fetch(`${s.server.url}/issues/${asked}`, { headers: { cookie: s.admin } });
+
+  // One is answered by finishing another issue, the other by answering a
+  // person. Merging them would send the reader looking in the wrong place.
+  assert.equal(first.headers.get("x-claimable"), "false");
+  assert.equal(first.headers.get("x-blocked-by"), blocker);
+  assert.equal(first.headers.get("x-unanswered-comments"), null);
+
+  assert.equal(second.headers.get("x-claimable"), "false");
+  assert.equal(second.headers.get("x-blocked-by"), null);
+  assert.ok(second.headers.get("x-unanswered-comments"));
+});
+
+test("a claimable listing offers nothing that claiming would refuse", async (t) => {
+  const s = await session(t);
+  const free = await refined(s, "빈 일");
+  const asked = await refined(s, "질문 걸린 일");
+  await comment(s, asked, "질문", "question");
+
+  const listed = await call(s, "GET", "/issues?claimable=true", { bearer: s.bot });
+  const keys = (listed.json.issues as unknown as Array<{ key: string }>).map((i) => i.key);
+
+  assert.ok(keys.includes(free), keys.join(", "));
+  assert.equal(keys.includes(asked), false);
+});
+
+test("a gated refusal writes nothing", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  await comment(s, key, "질문", "question");
+  const runId = await runFor(s, key);
+
+  const before = spawnSync("git", ["status", "--porcelain", "-uall"], {
+    cwd: s.board, encoding: "utf8",
+  }).stdout;
+  await call(s, "POST", `/issues/${key}/claim`, { bearer: s.bot, body: { run_id: runId } });
+  const after = spawnSync("git", ["status", "--porcelain", "-uall"], {
+    cwd: s.board, encoding: "utf8",
+  }).stdout;
+
+  assert.equal(after, before, "a refusal leaves no half-write behind");
+});
+
+// ── context (r18) ───────────────────────────────────────────────────────────
+
+test("the context answers the six things, and carries no comment list", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  const blocker = await refined(s, "선행");
+
+  const detail = await call(s, "GET", `/issues/${key}`, { cookie: s.admin });
+  const blockerDetail = await call(s, "GET", `/issues/${blocker}`, { cookie: s.admin });
+  await call(s, "POST", `/issues/${key}/links`, {
+    cookie: s.admin, etag: detail.etag ?? undefined,
+    body: { kind: "blocked_by", to: blockerDetail.json.uid },
+  });
+  await call(s, "PATCH", `/issues/${key}`, {
+    cookie: s.admin,
+    etag: (await call(s, "GET", `/issues/${key}`, { cookie: s.admin })).etag ?? undefined,
+    body: { acceptance: [{ text: "테스트가 통과한다" }] },
+  });
+  await comment(s, key, "잡담입니다", "general");
+  await comment(s, key, "이 방향으로 갑시다", "decision");
+
+  const found = await call(s, "GET", `/issues/${key}/context`, { bearer: s.bot });
+  assert.equal(found.status, 200, JSON.stringify(found.json));
+
+  const body = found.json as unknown as Record<string, never>;
+  assert.ok(body.etag, "the ETag it will send back as If-Match");
+  assert.ok((body.goal as unknown as { title: string }).title);
+  assert.equal(
+    (body.acceptance as unknown as Array<{ text: string }>)[0].text,
+    "테스트가 통과한다",
+  );
+  assert.equal(
+    (body.dependencies as unknown as { blocked_by: Array<{ key: string }> }).blocked_by[0].key,
+    blocker,
+  );
+  assert.ok((body.allowed as unknown as { scopes: string[] }).scopes.includes("issue:read"));
+
+  // §6.2's actual instruction: do not leave the agent reading everything to
+  // find the one line that was direction.
+  assert.equal("comments" in body, false);
+  assert.equal(JSON.stringify(body).includes("잡담입니다"), false);
+});
+
+test("the latest instruction is a person's question or decision, not their applause", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+
+  await comment(s, key, "이렇게 갑시다", "decision");
+  await comment(s, key, "고생하셨습니다", "general");
+  await comment(s, key, "에이전트가 남긴 결정", "decision", "bot");
+
+  const found = await call(s, "GET", `/issues/${key}/context`, { bearer: s.bot });
+  const instruction = found.json.latest_instruction as unknown as Record<string, unknown>;
+
+  // S4-D5: human, and meant as direction. The agent's own note is not an
+  // instruction to itself, and "고생하셨습니다" in that slot is worse than
+  // nothing.
+  assert.equal(instruction.body, "이렇게 갑시다");
+  assert.equal(instruction.kind, "decision");
+});
+
+test("no instruction is a normal answer", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  const found = await call(s, "GET", `/issues/${key}/context`, { bearer: s.bot });
+  assert.equal(found.json.latest_instruction, null);
+});
+
+test("the context's ETag is the issue's own", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+
+  const found = await call(s, "GET", `/issues/${key}/context`, { bearer: s.bot });
+  const etag = found.json.etag as unknown as string;
+
+  // R10: the same strong ETag, not a token of its own. An agent has to be able
+  // to send it straight back.
+  const edited = await call(s, "PATCH", `/issues/${key}`, {
+    cookie: s.admin, etag, body: { title: "컨텍스트의 ETag로 고침" },
+  });
+  assert.equal(edited.status, 200, JSON.stringify(edited.json));
+
+  // And once somebody else has moved, it is refused with the current document.
+  const stale = await call(s, "PATCH", `/issues/${key}`, {
+    cookie: s.admin, etag, body: { title: "같은 ETag로 또" },
+  });
+  assert.equal(stale.status, 412);
+  assert.ok(stale.json.document, "412 carries the document, the ETag and the rejected values");
+  assert.ok(stale.json.etag);
+});
+
+test("both ways of being blocked reach the context, separately", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  await comment(s, key, "질문", "question");
+
+  const found = await call(s, "GET", `/issues/${key}/context`, { bearer: s.bot });
+  assert.equal(found.json.claimable, false);
+  const reasons = found.json.blocked_reason as unknown as Array<{ kind: string }>;
+  assert.deepEqual(reasons.map((entry) => entry.kind), ["unanswered_comments"]);
+});
+
+test("a former key resolves to the same context", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+
+  // D3, AC25: an old key keeps working, so an agent holding one from before a
+  // rekey is not stranded.
+  const file = path.join(s.board, "issues", "LJ", `${key}.md`);
+  const text = fs.readFileSync(file, "utf8");
+  fs.writeFileSync(file, text.replace("former_keys: []", "former_keys: [LJ-999]"));
+  await call(s, "POST", "/index/rebuild", { cookie: s.admin });
+
+  const viaOld = await call(s, "GET", "/issues/LJ-999/context", { bearer: s.bot });
+  assert.equal(viaOld.status, 200, JSON.stringify(viaOld.json));
+  assert.equal((viaOld.json.issue as unknown as { key: string }).key, key);
+});
+
+test("a quarantined issue answers with the quarantine, not a context", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+
+  fs.appendFileSync(
+    path.join(s.board, "issues", "LJ", `${key}.md`),
+    "\n<<<<<<< HEAD\nconflict\n=======\nmarker\n>>>>>>> other\n",
+  );
+  await call(s, "POST", "/index/rebuild", { cookie: s.admin });
+
+  // §5.6, AC10. An agent handed a plausible context assembled from a document
+  // nobody could parse would carry on into a broken issue.
+  const found = await call(s, "GET", `/issues/${key}/context`, { bearer: s.bot });
+  assert.equal(found.status, 409);
+  assert.equal(found.json.quarantined, true);
+  assert.ok(String(found.json.path).endsWith(`${key}.md`));
+
+  // The same answer from the route people actually use. A full rebuild leaves
+  // no `issues` row to join against — which is precisely the state after a
+  // `git clean` or a schema bump — and the two routes must not disagree about
+  // whether the issue exists.
+  const detail = await call(s, "GET", `/issues/${key}`, { cookie: s.admin });
+  assert.equal(detail.status, 409, JSON.stringify(detail.json));
+  assert.equal(detail.json.error?.code, "E_ISSUE_QUARANTINED");
+});
+
+test("a token without issue:read gets no context", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+  const narrow = await call(s, "POST", "/tokens", {
+    cookie: s.admin, body: { user: "bot", scopes: ["run:write"] },
+  });
+
+  const refused = await call(s, "GET", `/issues/${key}/context`, {
+    bearer: narrow.json.token as unknown as string,
+  });
+  assert.equal(refused.status, 403);
+  assert.equal(refused.json.error?.code, "E_TOKEN_SCOPE");
+});
+
+test("reading a context records nothing", async (t) => {
+  const s = await session(t);
+  const key = await refined(s);
+
+  const count = (): number => {
+    const root = path.join(s.board, "events");
+    let found = 0;
+    for (const day of fs.readdirSync(root)) {
+      for (const file of fs.readdirSync(path.join(root, day))) {
+        found += fs
+          .readFileSync(path.join(root, day, file), "utf8")
+          .split("\n")
+          .filter((line) => line.trim() !== "").length;
+      }
+    }
+    return found;
+  };
+
+  const before = count();
+  for (let index = 0; index < 5; index += 1) {
+    await call(s, "GET", `/issues/${key}/context`, { bearer: s.bot });
+  }
+  // N7 excludes reads. An agent polling for work would otherwise be the
+  // loudest writer on the board.
+  assert.equal(count(), before);
+});
