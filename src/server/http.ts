@@ -18,8 +18,8 @@ import {
   claimIssue, ClaimError, holdsClaimOn, recordExpiredClaims, releaseClaim,
 } from "../domain/claim.ts";
 import {
-  addComment, appendOp, blockingComments, COMMENT_KINDS, CommentError, isCommentOp,
-  listComments, type CommentRecord,
+  addComment, appendOp, blockingComments, blockingCommentsFor, COMMENT_KINDS,
+  CommentError, isCommentOp, listComments, type CommentRecord,
 } from "../domain/comment.ts";
 import {
   endRun, findRun, heartbeatRun, listRunsFor, RunError, startRun, type RunRecord,
@@ -973,11 +973,15 @@ function listIssuesRoute(
   // created it: without this an agent's change is indistinguishable from the
   // human creation underneath it (§5.1, §8).
   const kinds = lastActorKinds(context.board, issues.map((issue) => issue.uid));
+  // The backlog shows cards too, and a gated issue has to look gated wherever
+  // it is drawn — not only on the board (r19b, r19c).
+  const gated = blockingCommentsFor(context.board, issues.map((issue) => issue.key));
   respondJson(response, 200, {
     issues: issues.map(({ createdByKind, ...issue }) => ({
       ...issue,
       created_by_kind: createdByKind,
       last_actor_kind: kinds.get(issue.uid) ?? null,
+      unanswered: gated.get(issue.key) ?? [],
     })),
     hasMore: page.hasMore,
     nextAfter: page.nextAfter === null ? null : encodeCursor(page.nextAfter),
