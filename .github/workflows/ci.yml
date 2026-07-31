@@ -2,7 +2,15 @@ name: CI
 
 on:
   push:
-    branches: ['**']
+    # Every branch except the board's. `localjira/data` is an orphan branch of
+    # issue files and events with no source in it — the suite would check out a
+    # tree with no package.json and fail on every board update, so the one place
+    # a red X would mean nothing is the one place it would always appear. D5
+    # keeps board and code in separate branches; this keeps CI in the code one.
+    #
+    # `branches-ignore` replaces `branches: ['**']` rather than joining it —
+    # GitHub rejects a workflow that sets both filters on one event.
+    branches-ignore: ['localjira/**']
   pull_request:
   workflow_dispatch:
 
