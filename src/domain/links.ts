@@ -1,3 +1,4 @@
+import { unindexedCount } from "../storage/integrity.ts";
 import type { BoardHandle } from "../storage/board.ts";
 import { IssueError } from "./issue.ts";
 
@@ -101,7 +102,11 @@ export function validateLink(
     .prepare("SELECT uid FROM issues WHERE uid = ? AND state = 'OK'")
     .get(to) as { uid: string } | undefined;
   if (!target) {
-    throw new IssueError("E_LINK_TARGET_NOT_FOUND", `No issue with uid ${to} to link to.`);
+    throw new IssueError(
+      "E_LINK_TARGET_NOT_FOUND",
+      `No issue with uid ${to} to link to.`,
+      unindexedHint(board),
+    );
   }
 
   return { id: linkId(kind, to), kind, to };
@@ -196,4 +201,20 @@ export function claimability(board: BoardHandle, uid: string): Claimability {
     claimable: unresolved.length === 0,
     blockedBy: unresolved.map((entry) => entry.key ?? entry.uid).sort(),
   };
+}
+
+
+/**
+ * What to add to a "no such issue" when the board could not read everything.
+ *
+ * A file that never parsed leaves no row and no uid anywhere, so a uid naming
+ * one is genuinely unresolvable — "not found" is literally true and still
+ * misleading. Naming the count keeps the answer honest without pretending the
+ * board knows which file was meant.
+ */
+export function unindexedHint(board: BoardHandle): string | null {
+  const count = unindexedCount(board.db);
+  return count === 0
+    ? null
+    : `${count} file(s) could not be indexed; the one you named may be among them. See /integrity/issues.`;
 }

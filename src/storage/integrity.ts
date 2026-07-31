@@ -326,6 +326,20 @@ export function quarantineList(db: DatabaseSync): QuarantineRecord[] {
   }));
 }
 
+/**
+ * How many files the board could not index at all.
+ *
+ * Used where a uid could not be resolved: after a full rebuild an unparseable
+ * file leaves no row *and* no uid in the error log, so "no such issue" is the
+ * only literal answer — and it is misleading when one of the files nobody could
+ * read might be the one meant. The count turns that into something a person can
+ * act on without the board pretending to know more than it does.
+ */
+export function unindexedCount(db: DatabaseSync): number {
+  const row = db.prepare("SELECT COUNT(*) AS c FROM index_errors").get() as { c: number };
+  return Number(row.c);
+}
+
 /** The quarantine record for one issue key, if it has one. */
 export function quarantineOf(db: DatabaseSync, key: string): QuarantineRecord | null {
   const row = db
@@ -411,5 +425,17 @@ export function isQuarantinedUid(db: DatabaseSync, uid: string): boolean {
   const row = db
     .prepare("SELECT 1 AS ok FROM issues WHERE uid = ? AND state = 'INVALID' LIMIT 1")
     .get(uid) as { ok: number } | undefined;
-  return row !== undefined;
+  if (row !== undefined) {
+    return true;
+  }
+
+  // The error log carries the uid when the row it replaced had one — which is
+  // the ordinary case, where a file that used to parse stopped. After a full
+  // rebuild it does not: nothing ever parsed the file, so nobody read a uid out
+  // of it, and there is no way to get from this uid to that file. That case is
+  // reported by `unindexedCount` at the call site instead of guessed at here.
+  const orphan = db
+    .prepare("SELECT 1 AS ok FROM index_errors WHERE uid = ? LIMIT 1")
+    .get(uid) as { ok: number } | undefined;
+  return orphan !== undefined;
 }

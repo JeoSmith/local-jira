@@ -7,6 +7,7 @@ import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { createUlid } from "../../src/bootstrap/identifier.ts";
 import { COMMENT_KINDS } from "../../src/domain/comment.ts";
 import { startServer, type RunningServer } from "../../src/server/http.ts";
 
@@ -913,4 +914,142 @@ test("a broken file does not stop the board minting new keys", async (t) => {
   const held = await call(s, "GET", `/issues/${broken}`, { cookie: s.admin });
   assert.equal(held.status, 409);
   assert.equal(held.json.error?.code, "E_ISSUE_QUARANTINED");
+});
+
+
+// ── 격리의 가장자리 (2026-07-31 진단에서 나온 셋) ───────────────────────────
+
+/** Breaks the file on disk and reindexes, leaving the issue quarantined. */
+async function quarantine(
+  s: Session,
+  key: string,
+  rebuild: boolean,
+  t?: { after: (fn: () => void | Promise<void>) => void },
+): Promise<void> {
+  fs.appendFileSync(
+    path.join(s.board, "issues", "LJ", `${key}.md`),
+    "\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> z\n",
+  );
+  if (rebuild) {
+    await call(s, "POST", "/index/rebuild", { cookie: s.admin });
+    return;
+  }
+  // The ordinary path: something noticed the file changed and the previous good
+  // row survives as INVALID. A restart's full pass is how a test gets there —
+  // `server.reconcile()` is the incremental path, and with no watcher running
+  // there is nothing for it to have noticed.
+  await s.server.close();
+  s.server = await startServer({ cwd: s.repo, port: 0, watch: false });
+  // The replacement needs its own cleanup: the hook registered in `session`
+  // holds the server it created, and leaving this one open hangs the run on a
+  // handle nobody closes.
+  t?.after(() => s.server.close());
+  s.admin = await signIn(s.server, "root");
+  s.member = await signIn(s.server, "dev");
+}
+
+test("naming a quarantined parent is refused, not an internal error", async (t) => {
+  const s = await session(t);
+  const parent = await anIssue(s, "곧 깨질 부모");
+  const detail = await call(s, "GET", `/issues/${parent}`, { cookie: s.admin });
+  const parentUid = detail.json.uid as unknown as string;
+
+  await quarantine(s, parent, false, t);
+
+  const attempt = await call(s, "POST", "/issues", {
+    cookie: s.admin,
+    body: { project: "LJ", type: "subtask", title: "자식", parent: parentUid },
+  });
+
+  // The request is refusable and the answer has to say which file to repair.
+  // 500 says the server broke; it did not, and it leaves the person with
+  // nothing to act on.
+  assert.equal(attempt.status, 409, JSON.stringify(attempt.json));
+  assert.equal(attempt.json.error?.code, "E_ISSUE_QUARANTINED");
+  assert.ok(String(attempt.json.path).endsWith(`${parent}.md`));
+
+  // The link route next door already answered this way; they now agree.
+  const other = await anIssue(s, "링크를 걸 이슈");
+  const current = await call(s, "GET", `/issues/${other}`, { cookie: s.admin });
+  const linked = await call(s, "POST", `/issues/${other}/links`, {
+    cookie: s.admin, etag: current.etag ?? undefined,
+    body: { kind: "blocked_by", to: parentUid },
+  });
+  assert.equal(linked.status, 409);
+  assert.equal(linked.json.error?.code, "E_ISSUE_QUARANTINED");
+});
+
+test("after a rebuild a uid cannot reach its broken file, and says as much", async (t) => {
+  const s = await session(t);
+  const target = await anIssue(s, "깨질 대상");
+  const detail = await call(s, "GET", `/issues/${target}`, { cookie: s.admin });
+  const targetUid = detail.json.uid as unknown as string;
+
+  // A rebuild leaves no row for a file that never parsed *and* no uid in the
+  // error log — nothing read one out of it. So this uid is genuinely
+  // unresolvable, and "not found" is literally true.
+  await quarantine(s, target, true);
+
+  const other = await anIssue(s, "링크를 걸 이슈");
+  const current = await call(s, "GET", `/issues/${other}`, { cookie: s.admin });
+  const linked = await call(s, "POST", `/issues/${other}/links`, {
+    cookie: s.admin, etag: current.etag ?? undefined,
+    body: { kind: "blocked_by", to: targetUid },
+  });
+
+  assert.equal(linked.status, 400);
+  assert.equal(linked.json.error?.code, "E_LINK_TARGET_NOT_FOUND");
+  // Literally true is not the same as useful. The board cannot say which file
+  // was meant, so it says how many it could not read rather than letting the
+  // person conclude the issue never existed.
+  assert.match(String(linked.json.error?.detail), /could not be indexed/);
+});
+
+test("a key two files claim says so, even when one cannot be read", async (t) => {
+  const s = await session(t);
+  const original = await anIssue(s, "원래 주인");
+  const donor = await anIssue(s, "빌려올 문서");
+
+  // What a pull can leave: a second file claiming a key the first still holds.
+  // Written before the quarantine so both are indexed.
+  const donorFile = path.join(s.board, "issues", "LJ", `${donor}.md`);
+  const newUid = createUlid(Date.now() + 120_000);
+  fs.writeFileSync(
+    path.join(s.board, "issues", "LJ", `${original}-dup.md`),
+    fs
+      .readFileSync(donorFile, "utf8")
+      .replace(/^uid: .*$/m, `uid: ${newUid}`)
+      .replace(/^key: .*$/m, `key: ${original}`),
+  );
+  await quarantine(s, original, false, t);
+
+  const found = await fetch(`${s.server.url}/issues/${original}`, {
+    headers: { cookie: s.admin },
+  });
+  assert.equal(found.status, 200, "the readable claimant is still served");
+
+  // Serving it silently would turn "here is the LJ-1 we can read" into "here is
+  // LJ-1", and a link or a trailer written against that key may have meant the
+  // other file.
+  const contested = found.headers.get("x-key-contested-by");
+  assert.ok(contested, "the other claimant is named");
+  assert.match(String(contested), new RegExp(`${original}\\.md`));
+
+  // An agent gets nothing to act on. A person can look at both files and
+  // decide; an agent handed the readable one would work on what may be the
+  // wrong issue, and that is the failure being guarded against (§5.6).
+  const context = await call(s, "GET", `/issues/${original}/context`, { cookie: s.admin });
+  assert.equal(context.status, 409);
+  assert.equal(context.json.quarantined, true);
+});
+
+test("an uncontested key says nothing", async (t) => {
+  const s = await session(t);
+  const key = await anIssue(s, "평범한 이슈");
+
+  const found = await fetch(`${s.server.url}/issues/${key}`, { headers: { cookie: s.admin } });
+  assert.equal(found.headers.get("x-key-contested-by"), null);
+
+  const context = await call(s, "GET", `/issues/${key}/context`, { cookie: s.admin });
+  assert.equal(context.status, 200);
 });
