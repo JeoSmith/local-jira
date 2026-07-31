@@ -1,9 +1,9 @@
 ---
 title: "Proposal 항목 단위 승인·기각과 백로그 편입"
-status: draft
+status: withdrawn
 owner: 이성훈
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-07-31
 related_prd: ../prd/backlog-sprint.md
 requirement: R22
 milestone: M5
@@ -11,6 +11,21 @@ priority: P2
 ---
 
 # Proposal 항목 단위 승인·기각과 백로그 편입
+
+> ## 🚫 철회 (2026-07-31, PRD D16)
+>
+> **이 스토리는 만들지 않는다.** AI 정제를 제품 기능에서 뺐다.
+>
+> 같은 목적은 **에이전트가 기존 `POST /issues`로 백로그를 적재**해 달성한다. `Proposal`이 사려던
+> "검토 없이 백로그에 들어와 일이 시작되는 것을 막는 관문"이 이미 세 개 있기 때문이다 —
+> `BACKLOG`는 claim 불가(§6.1, 거부 코드가 `E_CLAIM_NOT_REFINED`다), 미커밋 파일이 곧
+> 초안(D4·R25), `created_by_kind=agent` 배지(§8).
+>
+> 아래 인수조건은 **미달성이 아니라 무효**다. 체크되지 않은 상자는 못 한 일이 아니라 하지 않기로
+> 한 일이므로, 이월 대상을 적지 않는다. 기록으로 남겨 두는 이유는 나중에 "정제는 왜 없지"라는
+> 질문이 왔을 때 답이 파일에 있어야 하기 때문이다.
+>
+> 대체 경로: [백로그 적재 지침](../../8_templates/agent-backlog-loading.md) · PRD §13 D16
 
 ## 사용자 스토리 (User Story)
 
