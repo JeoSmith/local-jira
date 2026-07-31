@@ -38,6 +38,8 @@ $("#new-issue").addEventListener("click", () => openCreate());
 $("#create-cancel").addEventListener("click", closeCreate);
 $("#create-form").addEventListener("submit", submitCreate);
 $("#detail-edit").addEventListener("click", () => void openEdit());
+$("#comment-form").addEventListener("submit", submitComment);
+$("#comment-kind").addEventListener("change", noteCommentKind);
 $("#edit-cancel").addEventListener("click", closeEdit);
 $("#edit-form").addEventListener("submit", (event) => void submitEdit(event, false));
 $("#edit-reload").addEventListener("click", () => void reloadEdit());
@@ -537,6 +539,16 @@ function renderCard(issue) {
     blocked.append(element("span", "card-blocked", `차단 ${issue.blocked_by.join(", ")}`));
     card.append(blocked);
   }
+  // Told apart from a blocked_by wait: one is answered by finishing another
+  // issue, the other by answering a person, and they send the reader to
+  // different places (r19b).
+  if (issue.unanswered?.length) {
+    const asked = element("div", "card-meta");
+    asked.append(
+      element("span", "card-unanswered", `미해결 질문 ${issue.unanswered.length}건`),
+    );
+    card.append(asked);
+  }
   // Who is on it now, and whether that session is still answering. S5 is about
   // spotting the stalled ones by eye, so this belongs on the card rather than
   // behind a click.
@@ -651,6 +663,7 @@ async function openDetail(issue) {
   $("#timeline").replaceChildren();
   $("#detail").hidden = false;
   $("#detail-edit").hidden = !canCreate();
+  await loadComments();
   await loadCommits();
   await loadRuns();
   await loadActivity(false);
@@ -2052,4 +2065,176 @@ async function apiWithEtag(path) {
     throw failure;
   }
   return { body, etag: response.headers.get("etag") };
+}
+
+
+// ── 코멘트 (r19c) ────────────────────────────────────────────────────────────
+
+const KIND_LABELS = {
+  general: "일반",
+  question: "질문",
+  decision: "결정",
+  review_request: "리뷰 요청",
+};
+
+/** The two §6.3 gates an issue on. The others are conversation. */
+const GATING_KINDS = new Set(["question", "review_request"]);
+
+/**
+ * Says out loud what choosing a kind will do.
+ *
+ * `question` and `review_request` stop an agent picking the issue up, and
+ * somebody choosing one from a dropdown should know that before they press the
+ * button rather than after the board goes quiet (§6.3).
+ */
+function noteCommentKind() {
+  const kind = $("#comment-kind").value;
+  $("#comment-kind-note").textContent = GATING_KINDS.has(kind)
+    ? "해결할 때까지 에이전트가 이 이슈를 집지 못합니다."
+    : "";
+}
+
+async function loadComments() {
+  const detail = state.detail;
+  if (!detail) return;
+
+  $("#comment-form").hidden = !canComment();
+  noteCommentKind();
+
+  let payload;
+  try {
+    payload = await api(`/issues/${encodeURIComponent(detail.key)}/comments`);
+  } catch {
+    return;
+  }
+
+  const list = $("#comment-list");
+  list.replaceChildren();
+  $("#comments-none").hidden = payload.comments.length > 0;
+
+  const blocking = payload.comments.filter(
+    (comment) => GATING_KINDS.has(comment.kind) && !comment.resolved,
+  );
+  const banner = $("#comment-blocked");
+  // Named apart from a blocked_by wait: one is answered by finishing another
+  // issue, the other by answering a person (r19b).
+  banner.textContent = blocking.length
+    ? `미해결 ${blocking.map((c) => KIND_LABELS[c.kind]).join(" · ")} 때문에 에이전트가 이 이슈를 집을 수 없습니다.`
+    : "";
+  banner.hidden = blocking.length === 0;
+
+  for (const comment of payload.comments) {
+    list.append(renderComment(comment));
+  }
+}
+
+function renderComment(comment) {
+  const item = element("li", `comment${comment.resolved ? " resolved" : ""}`);
+
+  const head = element("div", "entry-head");
+  head.append(element("span", `comment-kind kind-${comment.kind}`, KIND_LABELS[comment.kind] || comment.kind));
+  head.append(element("span", "entry-verb", comment.author_display_name || comment.author_id));
+  // §8: an agent's words must not read as a person's.
+  head.append(actorBadge(comment.actor_kind === "agent" ? "agent" : "human"));
+  head.append(element("span", "entry-at", comment.created_at ? formatAt(comment.created_at) : ""));
+  if (comment.resolved) head.append(element("span", "comment-resolved", "해결됨"));
+  item.append(head);
+
+  item.append(element("div", "comment-body", comment.body));
+
+  const actions = element("div", "comment-actions");
+  const mine = comment.author_id === state.user?.id;
+
+  if (GATING_KINDS.has(comment.kind) || comment.resolved) {
+    // S4-D2: an agent may not settle a question asked of it. The button is
+    // absent rather than disabled — offering what will be refused teaches
+    // people to distrust the screen (AC7).
+    const mayResolve = mine || state.user?.role === "admin" || state.user?.role === "member";
+    if (mayResolve) {
+      actions.append(
+        commentButton(comment.resolved ? "해결 취소" : "해결", () =>
+          void commentOp(comment, comment.resolved ? "unresolve" : "resolve"),
+        ),
+      );
+    }
+  }
+  if (mine) {
+    actions.append(commentButton("수정", () => void editComment(comment)));
+    actions.append(commentButton("삭제", () => void deleteComment(comment)));
+  }
+  if (actions.childNodes.length > 0) item.append(actions);
+
+  return item;
+}
+
+function commentButton(label, run) {
+  const button = element("button", "comment-action", label);
+  button.type = "button";
+  button.addEventListener("click", run);
+  return button;
+}
+
+function canComment() {
+  return state.user?.role === "admin" || state.user?.role === "member";
+}
+
+async function submitComment(event) {
+  event.preventDefault();
+  const body = $("#comment-body").value.trim();
+  const error = $("#comment-error");
+
+  if (body === "") {
+    error.textContent = "내용을 입력하세요.";
+    error.hidden = false;
+    return $("#comment-body").focus();
+  }
+
+  const kind = $("#comment-kind").value;
+  $("#comment-submit").disabled = true;
+  try {
+    await api(`/issues/${encodeURIComponent(state.detail.key)}/comments`, {
+      method: "POST",
+      body: { body, kind },
+      // r15: derived from the text, so a double-click carries the same key and
+      // the server answers the second from the first.
+      headers: { "idempotency-key": `cmt-${digestOf({ body, kind })}` },
+    });
+  } catch (failure) {
+    error.textContent = failure.message;
+    error.hidden = false;
+    return;
+  } finally {
+    $("#comment-submit").disabled = false;
+  }
+
+  $("#comment-body").value = "";
+  error.hidden = true;
+  announce(`코멘트${josaEul("코멘트")} 남겼습니다.`);
+  await loadComments();
+  await refreshIssues();
+}
+
+async function commentOp(comment, op, extra = {}) {
+  try {
+    await api(`/comments/${encodeURIComponent(comment.comment_id)}/ops`, {
+      method: "POST",
+      body: { op, ...extra },
+    });
+  } catch (failure) {
+    return void announce(`처리하지 못했습니다: ${failure.message}`, true);
+  }
+  await loadComments();
+  // The board shows whether an issue is gated, so it moves too.
+  await refreshIssues();
+}
+
+async function editComment(comment) {
+  const next = prompt("코멘트 수정", comment.body);
+  if (next === null || next.trim() === "" || next === comment.body) return;
+  await commentOp(comment, "edit", { body: next });
+}
+
+async function deleteComment(comment) {
+  if (!confirm("이 코멘트를 삭제합니다. 원문 파일은 남고 목록에서만 빠집니다.")) return;
+  await commentOp(comment, "delete");
 }

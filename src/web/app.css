@@ -433,3 +433,48 @@ form button:disabled { opacity: .55; cursor: wait; }
   .conflict-mine { color: #a8dcbb; }
   #edit-force { border-color: #f0bcbc; color: #f0bcbc; }
 }
+
+/* ── 코멘트 ──────────────────────────────────────────────────────────────── */
+.comment-list { margin: 0; padding: 0; list-style: none; display: flex;
+  flex-direction: column; gap: 8px; }
+.comment { padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--card); }
+/* A resolved one recedes rather than disappears — the answer is part of the
+   thread, and hiding it would make the question look unanswered. */
+.comment.resolved { opacity: .68; }
+.comment-body { margin-top: 5px; font-size: 13px; white-space: pre-wrap; }
+.comment-kind { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.kind-general { background: #eceff3; color: #4a5568; }
+/* The two that gate carry the same amber as every other "look at this" in the
+   UI, so the signal is learned once. */
+.kind-question, .kind-review_request { background: #fbf0d9; color: #8a6d1f; }
+.kind-decision { background: #e8eef7; color: #2f4a72; }
+.comment-resolved { margin-left: auto; padding: 1px 7px; border-radius: 999px;
+  background: #e4f1e8; color: #2f6b46; font-size: 11px; font-weight: 600; }
+.comment-actions { display: flex; gap: 6px; margin-top: 7px; }
+.comment-action { padding: 3px 9px; border: 1px solid var(--line); border-radius: 6px;
+  background: transparent; color: var(--muted); font: inherit; font-size: 11px;
+  cursor: pointer; }
+.comment-action:hover { color: inherit; border-color: var(--muted); }
+.comment-blocked { margin: 0 0 8px; padding: 8px 11px; border-radius: 7px;
+  background: #fbf0d9; color: #8a6d1f; font-size: 12px; font-weight: 600; }
+.comment-form { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.comment-form-row { display: flex; align-items: center; gap: 8px; }
+.comment-form-row label { color: var(--muted); font-size: 11px; font-weight: 600; }
+.comment-form select, .comment-form textarea { padding: 7px 10px;
+  border: 1px solid var(--line); border-radius: 7px; background: transparent;
+  color: inherit; font: inherit; }
+.comment-form textarea { resize: vertical; font-family: inherit; }
+.comment-kind-note { color: #8a6d1f; font-size: 11px; }
+.card-unanswered { padding: 1px 7px; border-radius: 999px; background: #fbf0d9;
+  color: #8a6d1f; font-size: 11px; font-weight: 600; }
+
+@media (prefers-color-scheme: dark) {
+  .kind-general { background: #2a2f36; color: #b8c2cf; }
+  .kind-question, .kind-review_request { background: #33290f; color: #f0d3a8; }
+  .kind-decision { background: #21324a; color: #bcd3f0; }
+  .comment-resolved { background: #1d3326; color: #a8dcbb; }
+  .comment-blocked { background: #33290f; color: #f0d3a8; }
+  .comment-kind-note { color: #f0d3a8; }
+  .card-unanswered { background: #33290f; color: #f0d3a8; }
+}

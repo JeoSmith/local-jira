@@ -231,7 +231,29 @@
             <button id="detail-close" type="button" class="detail-close" aria-label="닫기">×</button>
           </div>
         </header>
-        <h3 class="detail-section">연결된 커밋</h3>
+        <h3 class="detail-section">코멘트</h3>
+        <p id="comment-blocked" class="comment-blocked" hidden></p>
+        <ol id="comment-list" class="comment-list"></ol>
+        <p id="comments-none" class="column-empty" hidden>아직 코멘트가 없습니다.</p>
+        <form id="comment-form" class="comment-form" hidden>
+          <div class="comment-form-row">
+            <label for="comment-kind">종류</label>
+            <select id="comment-kind">
+              <option value="general" selected>일반</option>
+              <option value="question">질문</option>
+              <option value="decision">결정</option>
+              <option value="review_request">리뷰 요청</option>
+            </select>
+            <span id="comment-kind-note" class="comment-kind-note"></span>
+          </div>
+          <textarea id="comment-body" rows="3" placeholder="코멘트를 남기세요"></textarea>
+          <p id="comment-error" class="form-error" role="alert" hidden></p>
+          <div class="create-actions">
+            <button type="submit" id="comment-submit">남기기</button>
+          </div>
+        </form>
+
+        <h3 class="detail-section settings-section">연결된 커밋</h3>
         <p id="commits-empty" class="column-empty" hidden>트레일러로 연결된 커밋이 없습니다.</p>
         <ol id="commit-list" class="timeline"></ol>
 

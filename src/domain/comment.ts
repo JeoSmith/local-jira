@@ -286,6 +286,40 @@ export function listComments(
   return rows.map(toComment);
 }
 
+/**
+ * Gating comments for many issues at once.
+ *
+ * One query for a page rather than one per card: the board and the backlog both
+ * need this for every issue they show, and asking per row turns a 50-issue list
+ * into 50 round trips through SQLite for a badge.
+ */
+export function blockingCommentsFor(
+  board: BoardHandle,
+  issueKeys: string[],
+): Map<string, string[]> {
+  const found = new Map<string, string[]>();
+  if (issueKeys.length === 0) {
+    return found;
+  }
+
+  const rows = board.db
+    .prepare(
+      `SELECT issue_key, comment_id FROM comments
+        WHERE deleted = 0 AND resolved = 0
+          AND kind IN ('question','review_request')
+          AND issue_key IN (${issueKeys.map(() => "?").join(",")})
+        ORDER BY created_at, comment_id`,
+    )
+    .all(...issueKeys) as Array<{ issue_key: string; comment_id: string }>;
+
+  for (const row of rows) {
+    const list = found.get(row.issue_key) ?? [];
+    list.push(row.comment_id);
+    found.set(row.issue_key, list);
+  }
+  return found;
+}
+
 /** Unresolved `question` and `review_request`, which are what gate an issue (§6.3). */
 export function blockingComments(board: BoardHandle, issueKey: string): CommentRecord[] {
   return listComments(board, issueKey).filter(
