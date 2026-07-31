@@ -101,13 +101,13 @@ function findBoard(): string | null {
  * cache that may not exist, and a server may not be running. The files are the
  * source of truth (ADR-001), which is exactly why this can read them directly.
  */
-function readBoard(board: string): Map<string, boolean> | null {
+function readBoard(board: string): Map<string, string> | null {
   const directory = path.join(board, "issues");
   if (!fs.existsSync(directory)) {
     return null;
   }
 
-  const found = new Map<string, boolean>();
+  const found = new Map<string, string>();
   const walk = (from: string): void => {
     for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
       const absolute = path.join(from, entry.name);
@@ -126,11 +126,27 @@ function readBoard(board: string): Map<string, boolean> | null {
       if (id === undefined) {
         continue;
       }
-      found.set(id, /^status:\s*DONE\s*$/m.test(text));
+      found.set(id, /^status:\s*(\S+)\s*$/m.exec(text)?.[1] ?? "(none)");
     }
   };
   walk(directory);
   return found;
+}
+
+/**
+ * The board status a story's `status:` implies, or null when it implies none.
+ *
+ * Only the two ends are pinned. `draft` says nothing about where a story sits
+ * on the board — it may be waiting, planned, or half built — and a checker that
+ * guessed would fail on ordinary work. `withdrawn` is here because D16 created
+ * that state and nothing was checking it: a story can be withdrawn in the file
+ * while the board still lists it as work to do, which is precisely the drift
+ * this script exists to catch.
+ */
+function boardStatusFor(storyStatus: string): string | null {
+  if (storyStatus === "done") return "DONE";
+  if (storyStatus === "withdrawn") return "CANCELLED";
+  return null;
 }
 
 /** What the board says versus what the story files say. */
@@ -148,17 +164,27 @@ function compareBoard(stories: Map<string, Story>, say: (message: string) => voi
   let missing = 0;
   let wrong = 0;
   for (const [id, story] of stories) {
-    const boardSaysDone = onBoard.get(id);
-    if (boardSaysDone === undefined) {
+    const boardStatus = onBoard.get(id);
+    if (boardStatus === undefined) {
       missing += 1;
       say(`보드에 ${id}가 없습니다. 스토리 파일에는 있습니다.`);
       continue;
     }
-    if ((story.status === "done") !== boardSaysDone) {
+
+    const expected = boardStatusFor(story.status);
+    // A story the file does not pin may sit anywhere on the board, but it may
+    // not sit at one of the two ends — those are claims the file would have to
+    // agree with.
+    const wrongly =
+      expected === null
+        ? boardStatus === "DONE" || boardStatus === "CANCELLED"
+        : boardStatus !== expected;
+
+    if (wrongly) {
       wrong += 1;
       say(
-        `보드의 ${id}는 ${boardSaysDone ? "DONE" : "미완료"}인데 ` +
-          `스토리 파일은 ${story.status}입니다.`,
+        `보드의 ${id}는 ${boardStatus}인데 스토리 파일은 ${story.status}입니다` +
+          `${expected === null ? "" : ` (${expected}이어야 합니다)`}.`,
       );
     }
   }
