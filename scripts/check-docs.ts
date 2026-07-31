@@ -12,11 +12,19 @@
  * underlying files do not already say. It derives the totals itself and fails
  * on any disagreement, which makes the sprint document a view of the stories
  * rather than a second, competing source of truth.
+ *
+ * The board this project keeps of its own work is the same kind of summary and
+ * drifted the same way: it went sixteen stories stale while saying M3 had not
+ * been started. So it is compared here too, when it can be found — the whole
+ * point of loading the work onto the board was that the tool would track
+ * itself, and a record nothing checks is a record that quietly stops being
+ * true.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -45,6 +53,119 @@ interface Story {
   ticked: number;
   total: number;
   carried: number;
+}
+
+/**
+ * Where the board lives, or null when it is not reachable.
+ *
+ * `LOCALJIRA_BOARD` first so anybody can point this at one, then the worktree
+ * list — ADR-006 makes the board a worktree of `localjira/data` in this very
+ * repository, so git already knows where it is and nothing has to be
+ * configured on a normal checkout.
+ *
+ * CI has neither: the data branch is not pushed, so the board simply is not
+ * there. That is reported rather than failed, because a check that fails where
+ * the thing it checks cannot exist teaches people to ignore it.
+ */
+function findBoard(): string | null {
+  const named = process.env.LOCALJIRA_BOARD;
+  if (named && fs.existsSync(path.join(named, "config.yaml"))) {
+    return named;
+  }
+
+  try {
+    const listed = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: ROOT,
+      encoding: "utf8",
+    });
+    const blocks = listed.split("\n\n");
+    for (const block of blocks) {
+      if (!/^branch refs\/heads\/localjira\/data$/m.test(block)) {
+        continue;
+      }
+      const where = /^worktree (.+)$/m.exec(block)?.[1];
+      if (where && fs.existsSync(path.join(where, "config.yaml"))) {
+        return where;
+      }
+    }
+  } catch {
+    // No git, or no worktrees. Either way there is no board to compare.
+  }
+  return null;
+}
+
+/**
+ * The story ids the board holds, and whether it calls each one done.
+ *
+ * Read from the files rather than through the API or the index: the index is a
+ * cache that may not exist, and a server may not be running. The files are the
+ * source of truth (ADR-001), which is exactly why this can read them directly.
+ */
+function readBoard(board: string): Map<string, boolean> | null {
+  const directory = path.join(board, "issues");
+  if (!fs.existsSync(directory)) {
+    return null;
+  }
+
+  const found = new Map<string, boolean>();
+  const walk = (from: string): void => {
+    for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+      const absolute = path.join(from, entry.name);
+      if (entry.isDirectory()) {
+        walk(absolute);
+        continue;
+      }
+      if (!entry.name.endsWith(".md")) {
+        continue;
+      }
+      const text = fs.readFileSync(absolute, "utf8");
+      // The title carries the story id, which is how the load put them on:
+      // `r13a PAT 발급·폐기·만료 수명 주기`.
+      const title = /^title:\s*(.+)$/m.exec(text)?.[1] ?? "";
+      const id = /^"?(r\d{2}[a-z]?)\b/.exec(title.trim())?.[1];
+      if (id === undefined) {
+        continue;
+      }
+      found.set(id, /^status:\s*DONE\s*$/m.test(text));
+    }
+  };
+  walk(directory);
+  return found;
+}
+
+/** What the board says versus what the story files say. */
+function compareBoard(stories: Map<string, Story>, say: (message: string) => void): string {
+  const board = findBoard();
+  if (board === null) {
+    return "보드를 찾지 못해 대조를 건너뜁니다 (LOCALJIRA_BOARD 또는 localjira/data worktree).";
+  }
+
+  const onBoard = readBoard(board);
+  if (onBoard === null) {
+    return `${board}에 이슈가 없어 대조를 건너뜁니다.`;
+  }
+
+  let missing = 0;
+  let wrong = 0;
+  for (const [id, story] of stories) {
+    const boardSaysDone = onBoard.get(id);
+    if (boardSaysDone === undefined) {
+      missing += 1;
+      say(`보드에 ${id}가 없습니다. 스토리 파일에는 있습니다.`);
+      continue;
+    }
+    if ((story.status === "done") !== boardSaysDone) {
+      wrong += 1;
+      say(
+        `보드의 ${id}는 ${boardSaysDone ? "DONE" : "미완료"}인데 ` +
+          `스토리 파일은 ${story.status}입니다.`,
+      );
+    }
+  }
+
+  return missing === 0 && wrong === 0
+    ? `보드와 스토리가 일치합니다 (${onBoard.size}건).`
+    : `보드가 스토리와 어긋납니다: 누락 ${missing}건, 상태 불일치 ${wrong}건.`;
 }
 
 interface Wave {
@@ -297,6 +418,9 @@ function report(
         `웨이브 ${waves ?? 0}개 · 전체 진행 ${earned}/${total}점 (${percent}%)\n`,
     );
   }
+
+  const boardNote = compareBoard(stories, (message) => fail(`보드: ${message}`));
+  process.stdout.write(`${boardNote}\n`);
 
   if (problems.length === 0) {
     process.stdout.write("문서와 스토리가 일치합니다.\n");
