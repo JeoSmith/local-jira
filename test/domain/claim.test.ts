@@ -1013,3 +1013,58 @@ test("a run without run:write cannot submit", async (t) => {
   assert.equal(attempt.status, 403);
   assert.equal(attempt.json.error?.code, "E_TOKEN_SCOPE");
 });
+
+/**
+ * The read path, which did not exist until r01e needed it.
+ *
+ * Who holds an issue was only ever on the board payload, and that covers the
+ * active sprint and nothing else — so a screen looking at a backlog issue could
+ * not tell whether somebody was working on it. The delete dialog has to warn
+ * before it destroys the thing an agent is holding, and it cannot warn about
+ * what it cannot see.
+ */
+test("a claim can be read back without going through the board", async (t) => {
+  const s = await session(t);
+  const key = await refinedIssue(s);
+
+  const empty = await call(s, "GET", `/issues/${key}/claim`, { cookie: s.admin });
+  assert.equal(empty.status, 200);
+  assert.equal(empty.json.claim, null, "nobody holds it yet");
+
+  const runId = await startRun(s, key, s.bot, "bot");
+  assert.equal(
+    (await call(s, "POST", `/issues/${key}/claim`, { bearer: s.bot, body: { run_id: runId } }))
+      .status,
+    200,
+  );
+
+  const held = await call(s, "GET", `/issues/${key}/claim`, { cookie: s.admin });
+  assert.equal(held.status, 200);
+  assert.equal((held.json.claim as unknown as { owner_id: string }).owner_id, "bot");
+  assert.equal((held.json.claim as unknown as { run_id: string }).run_id, runId);
+});
+
+test("reading the claim of an issue that is not there is 404, not an empty claim", async (t) => {
+  const s = await session(t);
+  const missing = await call(s, "GET", "/issues/LJ-9999/claim", { cookie: s.admin });
+  assert.equal(missing.status, 404);
+  assert.equal(missing.json.error.code, "E_ISSUE_NOT_FOUND");
+});
+
+/**
+ * The claim must not be folded into the issue representation.
+ *
+ * That body's bytes are the ETag (D15), so an agent taking a claim would move
+ * every editor's `If-Match` for a change nobody made to the issue.
+ */
+test("taking a claim does not move the issue's ETag", async (t) => {
+  const s = await session(t);
+  const key = await refinedIssue(s);
+
+  const before = await call(s, "GET", `/issues/${key}`, { cookie: s.admin });
+  const runId = await startRun(s, key, s.bot, "bot");
+  await call(s, "POST", `/issues/${key}/claim`, { bearer: s.bot, body: { run_id: runId } });
+  const after = await call(s, "GET", `/issues/${key}`, { cookie: s.admin });
+
+  assert.equal(after.etag, before.etag, "a claim is runtime state, not part of the issue");
+});

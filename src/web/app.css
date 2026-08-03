@@ -3,6 +3,10 @@
   --muted: #69736d;
   --line: #dfe5e1;
   --surface: #ffffff;
+  /* Used by the modals, inputs and charts and never defined until now, so
+     every `.palette` — the command palette, the create and edit forms —
+     rendered with a transparent background and the page showing through. */
+  --card: #ffffff;
   --canvas: #f3f5f2;
   --brand: #24583c;
   --brand-light: #e3eee7;
@@ -477,4 +481,57 @@ form button:disabled { opacity: .55; cursor: wait; }
   .comment-blocked { background: #33290f; color: #f0d3a8; }
   .comment-kind-note { color: #f0d3a8; }
   .card-unanswered { background: #33290f; color: #f0d3a8; }
+}
+
+/* ── 이슈 삭제 확인 (r01e) ───────────────────────────────────────────────── */
+/* Deliberately not styled like the other two modals' primary action: create and
+   edit are reversible in one keystroke, this one writes a file deletion. */
+.danger-ghost { border-color: var(--danger); color: var(--danger); }
+.danger-button { padding: 7px 16px; border: 1px solid var(--danger); border-radius: 7px;
+  background: var(--danger); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.danger-button:disabled { opacity: .55; cursor: default; }
+
+.delete-target { margin: 0 0 4px; font-size: 14px; line-height: 1.5; }
+.delete-target .issue-key { margin-right: 6px; }
+
+.delete-children { margin: 4px 0 0; padding: 10px 12px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--canvas); }
+.delete-children-lead { margin: 0 0 6px; font-size: 13px; line-height: 1.5; }
+.delete-children-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; }
+
+.delete-strategy { margin: 10px 0 0; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 7px; }
+.delete-strategy legend { padding: 0 4px; color: var(--muted); font-size: 11px;
+  font-weight: 600; }
+.delete-strategy-option { display: flex; gap: 7px; align-items: baseline; padding: 3px 0;
+  font-size: 13px; line-height: 1.5; cursor: pointer; }
+.delete-strategy-option input { margin: 0; }
+
+.delete-warning { margin: 8px 0 0; padding: 8px 10px; border-radius: 7px;
+  background: #fbeceb; color: var(--danger); font-size: 13px; line-height: 1.5; }
+.delete-note { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.delete-note code { padding: 1px 5px; border-radius: 4px; background: rgba(0,0,0,.06);
+  font-size: 11px; }
+
+@media (prefers-color-scheme: dark) {
+  .danger-ghost { border-color: #d98a83; color: #d98a83; }
+  .danger-button { border-color: #8c352e; background: #8c352e; }
+  .delete-children { border-color: #2c342e; background: #1a1f1c; }
+  .delete-strategy { border-color: #2c342e; }
+  .delete-warning { background: #3a2020; color: #f0bcbc; }
+  .delete-note code { background: rgba(255,255,255,.08); }
+}
+.delete-children-reason { margin: 0 0 6px; color: var(--muted); font-size: 12px;
+  line-height: 1.5; }
+
+/* `.palette` caps height at 70vh but nothing scrolled, so a tall dialog put its
+   own buttons past the bottom of the screen — found with the delete dialog once
+   the children list and the strategy choice were both showing, but create and
+   edit reach the same state on a short window. */
+.create-form { overflow-y: auto; }
+.delete-children-list { max-height: 22vh; overflow-y: auto; }
+
+@media (prefers-color-scheme: dark) {
+  /* Matches `.settings-view`, the one surface that was already spelled out. */
+  :root { --card: #1a1f1c; }
 }
