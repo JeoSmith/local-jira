@@ -7,6 +7,8 @@ import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runCli } from "../fixtures/cli-token.ts";
+
 import { startServer } from "../../src/server/http.ts";
 import { openBoardForWriting } from "../../src/storage/board.ts";
 import { fullReconcile } from "../../src/storage/reconcile.ts";
@@ -29,7 +31,8 @@ function git(cwd: string, args: string[]): string {
 }
 
 function cli(cwd: string, args: string[]) {
-  return spawnSync(process.execPath, [CLI, ...args], { cwd, encoding: "utf8" });
+  // r13c: `issue create` needs a token, which runCli mints for this board.
+  return runCli(cwd, args);
 }
 
 function makeSandbox(t: { after: (fn: () => void) => void }): Sandbox {

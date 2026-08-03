@@ -39,9 +39,10 @@ Content-Type: application/json
  "labels":["M1","P1"],"acceptance":[{"text":"Given … When … Then …"}]}
 ```
 
-**HTTP API를 쓴다. CLI로 만들지 않는다.** `localjira issue create`는 주체를 `human`으로
-고정하므로, CLI로 적재하면 AI가 만든 이슈가 **사람이 만든 것으로 기록된다**. 화면의 `agent`
-배지가 거짓이 되고 사람이 검토할 근거가 사라진다. (`r13c`가 이 구멍을 막는 스토리다.)
+**CLI를 써도 된다(r13c 이후).** `localjira issue create --project LJ --type story --title "..."`가
+`$LOCALJIRA_TOKEN`을 읽어 같은 주체로 기록한다. 토큰 없이 부르면 파일을 만들지 않고 거부한다 —
+예전에는 주체를 `human`으로 고정해서, CLI로 적재하면 AI가 만든 이슈가 사람이 만든 것으로
+기록됐다.
 
 지킬 것:
 
@@ -77,6 +78,11 @@ Content-Type: application/json
 
 1. **에이전트 계정과 토큰**을 만들고 `issue:edit`을 준다. 기본 에이전트 scope에는 생성 권한이
    없다 — 적재를 시킬 때만 의도해서 부여한다.
+
+   ```
+   localjira admin create --id bot --name "에이전트" --password <PW> --role agent
+   localjira token create --user bot --password <PW> --scope issue:read --scope issue:edit
+   ```
    기본 scope: `issue:read` · `issue:comment` · `issue:transition` · `run:write`.
    `issue:rank`·`issue:delete`는 사람 전용이다(D9). **`issue:delete`는 주지 않는다** — 에이전트가
    자기가 만든 것을 스스로 지울 수 있으면 검토 관문이 관문이 아니다.
@@ -94,7 +100,8 @@ Content-Type: application/json
 | 미커밋 파일이 곧 초안 | 검토 없이 이력에 남는 것 | D4·R25 |
 | `created_by_kind=agent` 배지 | AI 산출물이 사람 것처럼 보이는 것 | §8 |
 
-세 번째가 **HTTP API를 쓰라고 못박은 이유**다. CLI로 적재하면 그 관문 하나가 조용히 사라진다.
+세 번째가 r13c 이전에 **HTTP API를 쓰라고 못박았던 이유**다 — CLI로 적재하면 그 관문 하나가
+조용히 사라졌다. 지금은 두 경로가 같은 기록을 남기므로 어느 쪽을 써도 된다.
 
 ## 참고
 
