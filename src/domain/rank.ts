@@ -57,6 +57,9 @@ export function between(before: string | null, after: string | null): string {
   if (before === null && after === null) {
     return INITIAL_RANK;
   }
+  if (after === null) {
+    return append(before as string);
+  }
 
   const lower = before === null ? [] : digitsOf(before);
   const upper = after === null ? null : digitsOf(after);
@@ -72,6 +75,53 @@ export function between(before: string | null, after: string | null): string {
     throw new RankSpaceExhausted(before, after);
   }
   return rank;
+}
+
+/**
+ * The rank that goes after everything, at constant length.
+ *
+ * Adding to the end used to go through `midpoint`, which reads "no upper bound"
+ * as all-`z` and then takes the true middle. Appending therefore landed halfway
+ * to the top of the space every time and the rank grew by exactly two digits per
+ * issue: `hzzzzz` (6) → `qzzzzzhi` (8) → … → 32 at the fourteenth. Past that the
+ * caller reused the previous rank, so a board's fifteenth issue onwards all
+ * shared one rank and `duplicateRankRegions` reported the region for ever.
+ * Appending is the most ordinary thing a board does; it should not exhaust the
+ * precision of the format in a fortnight of use.
+ *
+ * So the end is treated as counting, not bisecting: read `before` as a number at
+ * a fixed width and add a step. Length stays put — six digits hold about two
+ * billion appends — and only an insert *between* two ranks pays for depth.
+ *
+ * `STEP` is `BASE` rather than 1 so consecutive appends are not adjacent: an
+ * insert between two of them has 35 values to choose from and does not have to
+ * lengthen either. That is a spacing choice, not a format change — every rank
+ * this produces is an ordinary rank, existing ranks keep their meaning, and two
+ * clones given the same `before` still compute the same answer.
+ */
+const STEP = BigInt(BASE);
+
+function append(before: string): string {
+  const digits = digitsOf(before);
+  // Never narrower than the initial rank, so early appends have room to count
+  // rather than immediately carrying into the leading digit.
+  let width = Math.max(digits.length, INITIAL_RANK.length);
+
+  for (; width <= MAX_RANK_LENGTH; width += 1) {
+    // Padding with zeros makes this the *smallest* value with that prefix, so
+    // adding anything positive is guaranteed to sort after `before`.
+    const next = valueAt(digits, width, 0) + STEP;
+    if (next <= maxValue(width)) {
+      // Rendered at full width and *not* trimmed of trailing zeros. Trimming
+      // would turn `i00000` into `i`, and the next append would read that back,
+      // pad it to six and produce `i00000` again — the same rank twice.
+      return renderFixed(next, width);
+    }
+    // The whole width is spent. One more digit is the "leading digit is already
+    // at maximum" case, and it is reached once per 36^(width-1) appends.
+  }
+
+  throw new RankSpaceExhausted(before, null);
 }
 
 /**
@@ -189,6 +239,17 @@ function valueAt(digits: number[] | null, width: number, filler: number): bigint
 
 function maxValue(width: number): bigint {
   return BigInt(BASE) ** BigInt(width) - 1n;
+}
+
+/** Like `render`, but keeps trailing zeros — see `append`. */
+function renderFixed(value: bigint, width: number): string {
+  const digits: string[] = [];
+  let remaining = value;
+  for (let index = 0; index < width; index += 1) {
+    digits.unshift(ALPHABET[Number(remaining % BigInt(BASE))]);
+    remaining /= BigInt(BASE);
+  }
+  return digits.join("");
 }
 
 function render(value: bigint, width: number): string {
