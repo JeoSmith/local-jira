@@ -7,7 +7,7 @@ title: r01b 이슈 수정·상태 전이·삭제
 status: DONE
 points: 3
 labels: [M1, P0, R1]
-backlog_rank: "zpvhzzzf6pvfqvhqzi"
+backlog_rank: "4nzzzt"
 acceptance:
   - id: ac1
     text: "Given ETag E1으로 읽은 이슈, When If-Match: E1과 함께 title·assignee·labels·points·acceptance를 수정하면, Then 200과 새 ETag가 반환되고 updated_at이 갱신되며 변경 파일은 그 이슈 파일 1개다."
@@ -30,9 +30,9 @@ acceptance:
 sprint: LJ-S1
 parent: 01KYPM933BYXX27G7012W6HZCH
 created_at: 2026-07-29T18:46:20+09:00
-updated_at: 2026-07-29T18:52:02+09:00
+updated_at: 2026-08-03T12:58:32+09:00
 created_by_kind: human
 last_actor_kind: human
-rev: 7
+rev: 8
 schema_version: 1
 ---

@@ -7,7 +7,7 @@ title: r02b 이슈 관계 링크와 blocked_by 기반 claimable 판정
 status: DONE
 points: 2
 labels: [M1, P0, R2]
-backlog_rank: "zxgvhzzusoguxpvfqvhqzi"
+backlog_rank: "5zzzzr"
 acceptance:
   - id: ac1
     text: "Given 이슈 A와 B, When A에 {kind: blocked_by, to: <B.uid>} 링크를 추가하면, Then 201이고 A의 파일 frontmatter links에 해당 항목이 uid 참조로 기록된다."
@@ -30,9 +30,9 @@ acceptance:
 sprint: LJ-S1
 parent: 01KYPM933BYXX27G7012W6HZCH
 created_at: 2026-07-29T18:46:21+09:00
-updated_at: 2026-07-29T18:52:02+09:00
+updated_at: 2026-08-03T12:58:32+09:00
 created_by_kind: human
 last_actor_kind: human
-rev: 7
+rev: 8
 schema_version: 1
 ---

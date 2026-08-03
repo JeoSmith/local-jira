@@ -7,7 +7,7 @@ title: r01a 이슈 생성·조회 (파일 SoT)
 status: DONE
 points: 3
 labels: [M1, P0, R1]
-backlog_rank: "zfqzzzyudfqvhqzi"
+backlog_rank: "3zzzzu"
 acceptance:
   - id: ac1
     text: Given 프로젝트 LJ가 초기화된 상태, When POST /issues에 type=story, title="백로그 리스트 가상 스크롤"을 보내면, Then 201과 함께 uid(ULID)·서버 발급 표시 키 LJ-<n>이 반환되고 .localjira/issues/LJ/LJ-<n>.md 파일 1개가 생성된다.
@@ -30,9 +30,9 @@ acceptance:
 sprint: LJ-S1
 parent: 01KYPM933BYXX27G7012W6HZCH
 created_at: 2026-07-29T18:46:20+09:00
-updated_at: 2026-07-29T18:52:02+09:00
+updated_at: 2026-08-03T12:58:32+09:00
 created_by_kind: human
 last_actor_kind: human
-rev: 7
+rev: 8
 schema_version: 1
 ---

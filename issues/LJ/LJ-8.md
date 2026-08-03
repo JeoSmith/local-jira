@@ -7,7 +7,7 @@ title: r02a 이슈 계층 규칙과 부모 삭제 전략
 status: DONE
 points: 3
 labels: [M1, P0, R2]
-backlog_rank: "zuxqzzzplcxpvfqvhqzi"
+backlog_rank: "5bzzzs"
 acceptance:
   - id: ac1
     text: Given type=epic 이슈, When parent를 지정해 생성·수정하면, Then 400이다 — epic은 최상위다.
@@ -30,9 +30,9 @@ acceptance:
 sprint: LJ-S1
 parent: 01KYPM933BYXX27G7012W6HZCH
 created_at: 2026-07-29T18:46:20+09:00
-updated_at: 2026-07-29T18:52:02+09:00
+updated_at: 2026-08-03T12:58:32+09:00
 created_by_kind: human
 last_actor_kind: human
-rev: 7
+rev: 8
 schema_version: 1
 ---
