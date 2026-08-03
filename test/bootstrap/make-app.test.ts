@@ -37,6 +37,37 @@ function sandbox(t: { after: (fn: () => void) => void }): string {
   return root;
 }
 
+/**
+ * The window has to be the app's own.
+ *
+ * The first version opened a Chromium window in `--app` mode. It looked right
+ * in Finder — the bundle's name and icon — and then you ran it and the Dock said
+ * "Google Chrome". A shortcut that opens a browser is not what was asked for,
+ * and nothing in the build said which one had been made.
+ */
+test("a machine with swiftc gets a native window, and the build says so", (t) => {
+  const root = sandbox(t);
+  const made = make(root, ["--repo", path.join(root, "board"), "--out", path.join(root, "out")]);
+  assert.equal(made.status, 0, made.stderr);
+
+  const macos = path.join(root, "out", "Local Jira.app", "Contents", "MacOS");
+  const compiled = fs.existsSync(path.join(macos, "Local Jira"));
+  const swift = spawnSync("swiftc", ["--version"], { encoding: "utf8" }).status === 0;
+
+  assert.equal(compiled, swift, "native when swiftc is there, browser launcher when it is not");
+  // Whichever it built, it has to say which — the difference is visible to the
+  // person the moment they launch it.
+  assert.match(made.stdout, compiled ? /네이티브/ : /브라우저 앱 모드/);
+
+  if (compiled) {
+    // A shim that hands the binary its board, not the browser launcher.
+    const shim = fs.readFileSync(path.join(macos, "launcher"), "utf8");
+    assert.match(shim, /LJ_REPO=/);
+    assert.match(shim, /exec /);
+    assert.equal(/--app=/.test(shim), false, "the native path must not open a browser");
+  }
+});
+
 test("the bundle has the pieces macOS needs to treat it as an app", (t) => {
   const root = sandbox(t);
   const made = make(root, ["--repo", path.join(root, "board"), "--out", path.join(root, "out")]);

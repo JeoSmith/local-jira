@@ -303,6 +303,54 @@ function writeIcon(resources: string): boolean {
 
 // ── build ───────────────────────────────────────────────────────────────────
 
+/**
+ * Compiles the real window, when the machine can.
+ *
+ * `swiftc` comes with the Xcode Command Line Tools and `WKWebView` comes with
+ * macOS, so this adds nothing to install — but a machine without the tools is
+ * ordinary, and there the browser launcher still works. Native when it can,
+ * a shortcut when it cannot, and the build says which one it made.
+ */
+function compileWindow(macos: string, options: Options): boolean {
+  const source = path.join(ROOT, "scripts", "window.swift");
+  if (!fs.existsSync(source)) {
+    return false;
+  }
+  const made = spawnSync(
+    "swiftc",
+    ["-O", "-o", path.join(macos, options.name), source],
+    { encoding: "utf8" },
+  );
+  if (made.status !== 0) {
+    if (made.stderr) {
+      process.stderr.write(`swiftc: ${made.stderr.split("\n")[0]}\n`);
+    }
+    return false;
+  }
+  return true;
+}
+
+/**
+ * A shim that hands the binary its board and then execs it.
+ *
+ * The window reads its settings from the environment so one compiled binary can
+ * serve any board; something has to put them there, and a bundle's executable
+ * is the only entry point macOS will call.
+ */
+function shim(options: Options): string {
+  return `#!/bin/sh
+set -u
+HERE=$(cd "$(dirname "$0")" && pwd)
+. "$HERE/../Resources/config.sh"
+
+LJ_REPO="$BOARD_REPO" \\
+LJ_CLI="$CLI" \\
+LJ_PORT="$PORT" \\
+LJ_NODE="$(command -v node || echo /usr/local/bin/node)" \\
+exec "$HERE/${options.name}"
+`;
+}
+
 function build(options: Options): string {
   const bundle = path.join(options.out, `${options.name}.app`);
   const macos = path.join(bundle, "Contents", "MacOS");
@@ -322,15 +370,27 @@ function build(options: Options): string {
       `APP_NAME='${options.name}'\n`,
   );
 
+  const native = compileWindow(macos, options);
   const executable = path.join(macos, "launcher");
-  fs.writeFileSync(executable, launcher(options));
+  fs.writeFileSync(executable, native ? shim(options) : launcher(options));
   fs.chmodSync(executable, 0o755);
 
   const icon = writeIcon(resources);
+
+  // Ad-hoc, so macOS will launch a bundle whose executable was just written.
+  // Without it a rebuilt app fails with "Launchd job spawn failed" and nothing
+  // in the message points at the signature.
+  spawnSync("codesign", ["--force", "--deep", "-s", "-", bundle], { encoding: "utf8" });
+
   process.stdout.write(
     `${bundle}\n` +
       `  보드   ${options.repo}\n` +
       `  포트   ${options.port}\n` +
+      `  창     ${
+        native
+          ? "네이티브 (WKWebView) — 독에 이 앱 이름과 아이콘으로 뜹니다"
+          : "브라우저 앱 모드 — swiftc가 없어 독에는 브라우저로 뜹니다"
+      }\n` +
       `  아이콘 ${icon ? "생성함" : "건너뜀 (iconutil 없음 — 기본 아이콘으로 뜹니다)"}\n` +
       "\n" +
       "  ~/Applications 로 옮기면 런치패드와 스포트라이트에 나옵니다.\n",
