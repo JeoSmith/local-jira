@@ -532,6 +532,38 @@ form button:disabled { opacity: .55; cursor: wait; }
 .delete-children-list { max-height: 22vh; overflow-y: auto; }
 
 @media (prefers-color-scheme: dark) {
-  /* Matches `.settings-view`, the one surface that was already spelled out. */
-  :root { --card: #1a1f1c; }
+  /*
+   * The dark theme never flipped its own text colours.
+   *
+   * `--ink` and `--muted` were declared once, in light, and every dark rule
+   * below overrode a *background* — so a dark panel got near-black text on it.
+   * `#detail-title` read `#17201b` on `#1a1f1c`; so did every heading, card
+   * title and value in the app. Several stories ticked "라이트/다크 두 테마
+   * 모두에서 렌더된다" against it, because nobody measured a colour.
+   *
+   * The values are the ones the hand-written dark rules were already using, so
+   * this agrees with them rather than competing.
+   */
+  :root {
+    --ink: #dfe6e1;
+    --muted: #9fb0a5;
+    --line: #2c342e;
+    --canvas: #121613;
+    --surface: #1a1f1c;
+    --card: #1a1f1c;
+  }
+}
+
+/* ── 부모·스프린트 지정 (r02c) ────────────────────────────────────────────── */
+.assign-grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px;
+  margin: 14px 0 4px; font-size: 13px; align-items: center; }
+.assign-grid dt { color: var(--muted); font-size: 11px; font-weight: 600; }
+.assign-grid dd { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.assign-current { color: var(--ink); }
+.assign-select { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card); color: inherit; font: inherit; font-size: 12px; max-width: 100%; }
+.assign-note { color: var(--muted); font-size: 12px; }
+
+@media (prefers-color-scheme: dark) {
+  .assign-select { border-color: #2c342e; }
 }

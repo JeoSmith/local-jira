@@ -35,7 +35,7 @@ import {
   TOKEN_DEFAULT_TTL_MS,
   type TokenRecord,
 } from "../auth/credentials.ts";
-import { createIssue, ISSUE_TYPES, IssueError } from "../domain/issue.ts";
+import { createIssue, ISSUE_TYPES, IssueError, type IssueType } from "../domain/issue.ts";
 import {
   addLink,
   ChildrenPresentError,
@@ -64,7 +64,7 @@ import {
 import { buildEvent, redact } from "../domain/events.ts";
 import { allowedTargets, isStatus, requiresAdmin, STATUSES } from "../domain/transition.ts";
 import { activityOf, lastActorKinds } from "../domain/activity.ts";
-import { childrenOf } from "../domain/hierarchy.ts";
+import { childrenOf, parentCandidates } from "../domain/hierarchy.ts";
 import { claimability, relatedTo } from "../domain/links.ts";
 import {
   createSprint,
@@ -575,6 +575,18 @@ async function handle(
   if (commentOp && request.method === "POST") {
     return guard(response, authed, "issue:write", "issue:comment", () =>
       commentOpRoute(decodeURIComponent(commentOp[1]), request, response, authed),
+    );
+  }
+  if (request.method === "GET" && url.pathname.endsWith("/assignable")) {
+    // What this issue may be given: parents it is allowed to hang under, and
+    // sprints that will take it. Both are the server's rules (§5.1 hierarchy,
+    // `requireOpenSprint`), and the screen asking rather than deciding is what
+    // keeps a dropdown from offering a choice the write path refuses (r02c).
+    const key = decodeURIComponent(
+      url.pathname.slice("/issues/".length, -"/assignable".length),
+    );
+    return guard(response, authed, "issue:read", "issue:read", () =>
+      assignableRoute(key, response, authed),
     );
   }
   if (request.method === "GET" && url.pathname.endsWith("/claim")) {
@@ -2486,6 +2498,49 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
  * reparented onto it — an If-Match conflict caused by an edit the caller never
  * made and cannot see.
  */
+/**
+ * The parents and sprints this issue may be moved to.
+ *
+ * One request rather than two because the screen opens both pickers at once and
+ * a half-answered panel is worse than a slower one.
+ */
+function assignableRoute(
+  key: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const found = findIssue(context.board, key);
+  if (found === null || !("issue" in found)) {
+    return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
+  }
+  const issue = found.issue;
+  const type = String((issue.resource as Record<string, unknown>).type ?? "");
+
+  const candidates = isIssueType(type)
+    ? parentCandidates(context.board, type, issue.uid)
+    : [];
+
+  respondJson(response, 200, {
+    // Empty *and* explained: an epic has no possible parent, which is a
+    // different thing from "there happen to be none on this board yet", and the
+    // screen has to say so rather than show an empty list.
+    parents: candidates,
+    parent_allowed: candidates.length > 0 || canBeChild(type),
+    sprints: listSprints(context.board, issue.project)
+      .filter((sprint) => sprint.status !== "CLOSED")
+      .map((sprint) => ({ id: sprint.id, name: sprint.name, status: sprint.status })),
+  });
+}
+
+function isIssueType(value: string): value is IssueType {
+  return (ISSUE_TYPES as readonly string[]).includes(value);
+}
+
+/** Whether the type may have a parent at all, regardless of what exists today. */
+function canBeChild(type: string): boolean {
+  return isIssueType(type) && type !== "epic";
+}
+
 function showClaimRoute(
   key: string,
   response: http.ServerResponse,

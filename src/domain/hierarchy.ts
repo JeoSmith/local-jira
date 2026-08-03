@@ -126,6 +126,54 @@ export function descendsFrom(
   return false;
 }
 
+export interface ParentCandidate {
+  uid: string;
+  key: string;
+  type: string;
+  title: string | null;
+}
+
+/**
+ * The issues this one could be given as a parent.
+ *
+ * Exists so the screen does not have to carry a copy of `ALLOWED_PARENTS`. A
+ * dropdown built from a client-side copy of the type rules is a copy that
+ * drifts the day a type is added, and the first sign is a choice the UI offered
+ * and the server refused. The same reasoning as the delete strategies in r01e:
+ * whoever owns the rule answers the question.
+ *
+ * Descendants are excluded rather than left to fail validation — offering a
+ * choice that is guaranteed to come back `E_PARENT_CYCLE` is offering a trap.
+ * Quarantined rows never appear because they are not `state = 'OK'`.
+ */
+export function parentCandidates(
+  board: BoardHandle,
+  childType: IssueType,
+  childUid: string | null,
+): ParentCandidate[] {
+  const allowed = ALLOWED_PARENTS[childType];
+  if (allowed.length === 0) {
+    return [];
+  }
+
+  const placeholders = allowed.map(() => "?").join(", ");
+  const rows = board.db
+    .prepare(
+      `SELECT uid, key, type, title FROM issues
+        WHERE state = 'OK' AND type IN (${placeholders})
+        ORDER BY key`,
+    )
+    .all(...allowed) as Array<{ uid: string; key: string; type: string; title: string | null }>;
+
+  return rows.filter((row) => {
+    if (childUid === null) {
+      return true;
+    }
+    // Not itself, and not anything already below it.
+    return row.uid !== childUid && !descendsFrom(board, row.uid, childUid);
+  });
+}
+
 export interface ChildRow {
   uid: string;
   key: string;

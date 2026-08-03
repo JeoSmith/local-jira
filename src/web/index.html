@@ -271,6 +271,28 @@
             <button id="detail-close" type="button" class="detail-close" aria-label="닫기">×</button>
           </div>
         </header>
+
+        <!-- r02c. `parent` is a uid in the file (§5.1), which nobody picks by
+             eye — so the screen shows key and title and asks the server which
+             ones are choosable. -->
+        <dl class="assign-grid">
+          <dt>부모</dt>
+          <dd>
+            <span id="assign-parent-current" class="assign-current">최상위</span>
+            <select id="assign-parent" class="assign-select" hidden
+                    aria-label="부모 이슈"></select>
+            <span id="assign-parent-note" class="assign-note" hidden></span>
+          </dd>
+          <dt>스프린트</dt>
+          <dd>
+            <span id="assign-sprint-current" class="assign-current">백로그</span>
+            <select id="assign-sprint" class="assign-select" hidden
+                    aria-label="스프린트"></select>
+            <span id="assign-sprint-note" class="assign-note" hidden></span>
+          </dd>
+        </dl>
+        <p id="assign-error" class="form-error" role="alert" hidden></p>
+
         <h3 class="detail-section">코멘트</h3>
         <p id="comment-blocked" class="comment-blocked" hidden></p>
         <ol id="comment-list" class="comment-list"></ol>
