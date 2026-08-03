@@ -9,12 +9,16 @@ jira-docs/
   0_decisions/             ADR-001~006
   2_requirements/
     prd/                    제품 요구사항
-    story/                  R1~R26에서 분해한 스토리 42건
+    story/                  R1~R26에서 분해한 스토리
   3_designs/
     detailed/               저장 계층·M0·구현 스택 상세 설계
     database/               SQLite 스키마
   4_plans/
     sprints/                스프린트 실행 계획
+  5_tests/
+    test-plan/              시험 계획
+  7_operations/             보드를 운영하며 필요한 절차
+  8_templates/              프로젝트에 복사해 쓰는 지침
 ```
 
 ## 주요 문서
@@ -27,6 +31,8 @@ jira-docs/
 - [M0 부트스트랩 상세 설계](3_designs/detailed/m0-bootstrap.design.md)
 - [구현 스택과 프로젝트 구조](3_designs/detailed/implementation-stack.design.md)
 - [Sprint 01 계획](4_plans/sprints/sprint-01-m1-reliable-core.md)
+- [CLI 토큰 만들기](7_operations/cli-token.md) — 보드에 쓰려면 주체를 밝혀야 한다(S6-D3)
+- [백로그 적재 지침](8_templates/agent-backlog-loading.md) — 에이전트에게 시킬 때 복사해 쓴다
 
 ## 문서 흐름
 
