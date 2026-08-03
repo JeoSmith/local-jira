@@ -253,6 +253,23 @@ test("cascade_cancel cancels the children and then removes the parent", async (t
   assert.equal(cancelled.status, 200, "the child survives as a record");
   assert.equal((cancelled.json as unknown as { status: string }).status, "CANCELLED");
   assert.equal(fs.existsSync(path.join(session.board, "issues", "LJ", `${story.key}.md`)), false);
+
+  // The three assertions above all passed while the cascade left every child
+  // pointing at the deleted parent, because a quarantined issue still answers
+  // GET from its last good row and its status still reads CANCELLED. What none
+  // of them looked at was the board.
+  const file = fs.readFileSync(
+    path.join(session.board, "issues", "LJ", `${subtask.key}.md`),
+    "utf8",
+  );
+  assert.equal(/^parent:/m.test(file), false, "the child must not name a deleted parent");
+
+  const integrity = await call(session, "GET", "/integrity/issues");
+  assert.deepEqual(
+    (integrity.json as unknown as { quarantined: unknown[] }).quarantined,
+    [],
+    "cascade_cancel must not leave the board holding an INVALID issue",
+  );
 });
 
 test("an unknown strategy is refused rather than treated as none", async (t) => {

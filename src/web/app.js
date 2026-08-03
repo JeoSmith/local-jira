@@ -38,6 +38,9 @@ $("#new-issue").addEventListener("click", () => openCreate());
 $("#create-cancel").addEventListener("click", closeCreate);
 $("#create-form").addEventListener("submit", submitCreate);
 $("#detail-edit").addEventListener("click", () => void openEdit());
+$("#detail-delete").addEventListener("click", () => void openDelete());
+$("#delete-cancel").addEventListener("click", closeDelete);
+$("#delete-confirm").addEventListener("click", () => void submitDelete());
 $("#comment-form").addEventListener("submit", submitComment);
 $("#comment-kind").addEventListener("change", noteCommentKind);
 $("#edit-cancel").addEventListener("click", closeEdit);
@@ -50,9 +53,10 @@ $("#view-backlog").addEventListener("click", () => void switchView("backlog"));
 $("#index-verify").addEventListener("click", () => void runIndexOp("verify"));
 $("#index-rebuild").addEventListener("click", () => void runIndexOp("rebuild"));
 $("#timeline-more").addEventListener("click", () => void loadActivity(true));
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && state.detail) closeDetail();
-});
+// Escape lives in `onGlobalKey` alone. A second listener here used to close the
+// detail panel whenever `state.detail` was set — including while a modal was
+// open over it, so one Escape dismissed both and the focus the modal meant to
+// restore had been hidden along with the panel behind it.
 
 async function boot() {
   try {
@@ -642,6 +646,11 @@ function josaEul(word) {
   return endsInConsonant(word).closed ? "을" : "를";
 }
 
+/** `이` after a final consonant, `가` otherwise — the subject particle. */
+function josaI(word) {
+  return endsInConsonant(word).closed ? "이" : "가";
+}
+
 const ACTOR_LABELS = { human: "사람", agent: "에이전트", external: "외부 편집", system: "시스템" };
 
 /**
@@ -663,6 +672,7 @@ async function openDetail(issue) {
   $("#timeline").replaceChildren();
   $("#detail").hidden = false;
   $("#detail-edit").hidden = !canCreate();
+  refreshDeleteAffordance();
   await loadComments();
   await loadCommits();
   await loadRuns();
@@ -1550,6 +1560,76 @@ const palette = { open: false, items: [], active: 0, restore: null };
  * typing "?" into a title is typing a question mark, and a shortcut that eats it
  * makes the field feel broken.
  */
+/**
+ * The modal currently holding the keyboard, innermost first.
+ *
+ * Order matters twice: Escape closes the one on top, and Tab is confined to the
+ * same one. Delete can open over the detail panel and Edit over nothing, so
+ * "topmost" is this list, not the DOM order.
+ */
+function openModal() {
+  for (const [backdrop, inner] of [
+    ["#delete-backdrop", "#delete-dialog"],
+    ["#edit-backdrop", "#edit-form"],
+    ["#create-backdrop", "#create-form"],
+  ]) {
+    if (!$(backdrop).hidden) return $(inner);
+  }
+  return null;
+}
+
+/**
+ * Elements Tab can reach inside a container.
+ *
+ * `getClientRects()` rather than `offsetParent`: the modals are positioned,
+ * and a fixed element reports a null `offsetParent` even while plainly visible
+ * — which would have emptied this list and turned the trap into a no-op.
+ */
+function focusableIn(root) {
+  return [...root.querySelectorAll("input, textarea, select, button, a[href], [tabindex]")].filter(
+    (item) =>
+      !item.disabled &&
+      item.tabIndex !== -1 &&
+      !item.hidden &&
+      item.getClientRects().length > 0,
+  );
+}
+
+/**
+ * Keeps Tab inside the open modal.
+ *
+ * r01c and r01d both promised this and neither had it: seven Tab presses in the
+ * create form walked focus out to the toolbar's export button while the form
+ * stayed open, so a keyboard user could be typing into a control they could not
+ * see. The acceptance criteria were ticked against an implementation that did
+ * not exist, which is why this is a shared helper — one trap for every modal,
+ * rather than three chances to forget.
+ */
+function trapTab(event) {
+  const modal = openModal();
+  if (modal === null) return;
+
+  const items = focusableIn(modal);
+  if (items.length === 0) return;
+
+  const first = items[0];
+  const last = items[items.length - 1];
+  const here = document.activeElement;
+
+  if (!modal.contains(here)) {
+    event.preventDefault();
+    return (event.shiftKey ? last : first).focus();
+  }
+  if (event.shiftKey && here === first) {
+    event.preventDefault();
+    return last.focus();
+  }
+  if (!event.shiftKey && here === last) {
+    event.preventDefault();
+    return first.focus();
+  }
+}
+
 function onGlobalKey(event) {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
@@ -1557,11 +1637,17 @@ function onGlobalKey(event) {
   }
   if (event.key === "Escape") {
     if (palette.open) return closePalette();
+    if (!$("#delete-backdrop").hidden) return closeDelete();
     if (!$("#edit-backdrop").hidden) return closeEdit();
     if (!$("#create-backdrop").hidden) return closeCreate();
     if (!$("#shortcut-help").hidden) return closeHelp();
+    // Last, so a modal over the detail panel takes the key first.
+    if (state.detail) return closeDetail();
     return;
   }
+  // Before the typing check, since focus is normally in a field when a modal is
+  // open — testing for that first would exempt exactly the case this guards.
+  if (event.key === "Tab" && !palette.open) return trapTab(event);
   if (isTyping(event.target)) return;
   if (event.key === "?") {
     event.preventDefault();
@@ -2051,6 +2137,245 @@ async function reloadEdit() {
     list.append(element("dd", "conflict-mine", value === "" ? "(빈 값)" : value));
   }
 }
+
+// ── 이슈 삭제 (r01e) ─────────────────────────────────────────────────────────
+
+const remove = { key: null, etag: null, restore: null, busy: false, strategy: null };
+
+/**
+ * Deleting is `issue:delete`, which admin and member both hold (S1-D11).
+ *
+ * Not folded into `canCreate`: they happen to coincide for these two roles, and
+ * a shared helper would quietly extend any future change to one of them to the
+ * other as well.
+ */
+function canDelete() {
+  return state.user?.role === "admin" || state.user?.role === "member";
+}
+
+function refreshDeleteAffordance() {
+  $("#detail-delete").hidden = !canDelete();
+}
+
+/**
+ * Opens the confirmation on fresh values.
+ *
+ * Read again rather than trusted from the card, for the same reason the edit
+ * form does: the ETag sent as `If-Match` has to be the one just seen, so the
+ * delete refuses if somebody changed the issue while this was on screen. What
+ * is deleted must be what was looked at.
+ */
+async function openDelete() {
+  const detail = state.detail;
+  if (!detail || !canDelete()) return;
+
+  let found;
+  try {
+    found = await apiWithEtag(`/issues/${encodeURIComponent(detail.key)}`);
+  } catch (failure) {
+    // §5.6: quarantined issues answer 409 here, and the dialog must not open on
+    // a document the board cannot vouch for.
+    return void announce(`삭제할 수 없습니다: ${failure.message}`, true);
+  }
+
+  remove.key = detail.key;
+  remove.etag = found.etag;
+  remove.restore = document.activeElement;
+  remove.strategy = null;
+
+  $("#delete-key").textContent = detail.key;
+  $("#delete-title").textContent = String(found.body.title ?? "");
+  $("#delete-error").hidden = true;
+  $("#delete-children").hidden = true;
+  $("#delete-strategy").hidden = true;
+  $("#delete-confirm").disabled = false;
+
+  // Children are shown as soon as the dialog opens — the count is what makes
+  // "this is bigger than one issue" visible before the button is pressed. The
+  // *rule* about what may be done with them still comes from the server's 409
+  // below; this is data, not a second copy of §5.1.
+  const children = await childrenOf(detail.key);
+  if (children.length > 0) {
+    showChildren(children, `이 이슈에는 하위 이슈가 ${children.length}건 있습니다.`);
+  }
+
+  // A live claim by somebody else means an agent or a person is working on this
+  // right now (§6.1). Deleting is allowed, but not silently.
+  //
+  // Asked of the server rather than read from `state.issues`, which never
+  // carries a claim — only the board payload does, and only for the active
+  // sprint. Taking it from there would have made this warning appear on the
+  // board and never in the backlog, where agent-loaded issues are cleaned up.
+  const claim = await claimOn(detail.key);
+  const warning = $("#delete-claim");
+  const mine = claim !== null && claim.owner_id === state.user?.id;
+  warning.hidden = claim === null || mine;
+  if (claim !== null && !mine) {
+    warning.textContent =
+      `${claim.owner_id}${josaI(claim.owner_id)} 이 이슈를 선점 중입니다. ` +
+      "지금 삭제하면 그 작업이 대상을 잃습니다.";
+  }
+
+  $("#delete-backdrop").hidden = false;
+  // The cancel button, not the delete one. A destructive dialog that opens with
+  // the destructive action focused turns a stray Enter into the thing it exists
+  // to prevent.
+  $("#delete-cancel").focus();
+}
+
+async function claimOn(key) {
+  try {
+    return (await api(`/issues/${encodeURIComponent(key)}/claim`)).claim ?? null;
+  } catch {
+    // A warning that could not be fetched is a missing warning, not a reason to
+    // refuse the delete — the server still enforces §6.1 on its own.
+    return null;
+  }
+}
+
+async function childrenOf(key) {
+  try {
+    const payload = await api(`/issues/${encodeURIComponent(key)}/children`);
+    return payload.children ?? [];
+  } catch {
+    // Not fatal: the server refuses the delete itself if children turn out to
+    // be there, so a failure here costs a warning, not correctness.
+    return [];
+  }
+}
+
+/**
+ * Lists the children and, once the server has named them, the strategies.
+ *
+ * `reason` is the server's own refusal text, shown beside the count rather than
+ * in place of it: the count is data this screen already had, the refusal is the
+ * server's, and replacing one with the other loses the readable half.
+ */
+function showChildren(children, lead, strategies = null, reason = "") {
+  $("#delete-children-lead").textContent = lead;
+  const note = $("#delete-children-reason");
+  note.textContent = reason;
+  note.hidden = reason === "";
+
+  const list = $("#delete-children-list");
+  list.replaceChildren();
+  for (const child of children) {
+    const item = element("li");
+    item.append(element("span", "issue-key", child.key ?? String(child)));
+    if (child.title) item.append(element("span", "", ` ${child.title}`));
+    list.append(item);
+  }
+  $("#delete-children").hidden = false;
+
+  if (strategies === null) return;
+
+  const fieldset = $("#delete-strategy");
+  fieldset.replaceChildren(element("legend", "", "하위 이슈를 어떻게 할까요?"));
+  const described = {
+    promote: "최상위로 올린다 — 하위 이슈는 그대로 남습니다",
+    cascade_cancel: "함께 취소한다 — 하위 이슈가 CANCELLED가 된 뒤 삭제됩니다",
+  };
+  for (const name of strategies) {
+    const label = element("label", "delete-strategy-option");
+    const radio = element("input");
+    radio.type = "radio";
+    radio.name = "delete-strategy";
+    radio.value = name;
+    // Neither is preselected. Both are destructive in different ways and which
+    // is right is a judgement about the work, not a default worth guessing.
+    radio.addEventListener("change", () => {
+      remove.strategy = name;
+      $("#delete-error").hidden = true;
+    });
+    label.append(radio, element("span", "", described[name] ?? name));
+    fieldset.append(label);
+  }
+  fieldset.hidden = false;
+  fieldset.querySelector("input")?.focus();
+}
+
+function closeDelete() {
+  $("#delete-backdrop").hidden = true;
+  $("#delete-children").hidden = true;
+  $("#delete-strategy").hidden = true;
+  $("#delete-claim").hidden = true;
+  remove.key = null;
+  remove.etag = null;
+  remove.strategy = null;
+  if (remove.restore && document.contains(remove.restore)) remove.restore.focus();
+  remove.restore = null;
+}
+
+/**
+ * Deletes, and lets the server decide what a parent needs.
+ *
+ * The first attempt carries no strategy on purpose. If children are in the way
+ * the server answers 409 with both the children and the strategy names, and
+ * those are what the dialog offers — so the rule lives in one place. Deciding
+ * here which strategies exist would be a copy that drifts the day §5.1 gains a
+ * third one.
+ */
+async function submitDelete() {
+  if (remove.busy || remove.key === null) return;
+
+  const error = $("#delete-error");
+  const needsChoice = !$("#delete-strategy").hidden;
+  if (needsChoice && remove.strategy === null) {
+    error.textContent = "하위 이슈를 어떻게 할지 고르세요.";
+    error.hidden = false;
+    return $("#delete-strategy").querySelector("input")?.focus();
+  }
+
+  const query = remove.strategy === null ? "" : `?strategy=${remove.strategy}`;
+  // Only a 412 makes pressing again pointless — the document under this dialog
+  // is not the one it described. Every other refusal is something the person can
+  // answer here, so the button has to come back; keying that off "is an error
+  // showing" left a rejected strategy with no way to choose the other one.
+  let stale = false;
+  remove.busy = true;
+  $("#delete-confirm").disabled = true;
+  try {
+    await api(`/issues/${encodeURIComponent(remove.key)}${query}`, {
+      method: "DELETE",
+      ifMatch: remove.etag,
+    });
+  } catch (failure) {
+    if (failure.code === "E_CHILDREN_PRESENT") {
+      const children = failure.payload?.children ?? [];
+      showChildren(
+        children.map((key) => ({ key })),
+        `이 이슈에는 하위 이슈가 ${children.length}건 있습니다. 어떻게 할지 고른 뒤 다시 삭제하세요.`,
+        failure.payload?.strategies ?? [],
+        failure.message,
+      );
+      error.hidden = true;
+      return;
+    }
+    if (failure.status === 412) {
+      // Someone changed it while this dialog was open. Deleting anyway would
+      // destroy a version nobody in this window ever saw (D15).
+      error.textContent =
+        "이 이슈가 방금 다른 곳에서 바뀌었습니다. 닫고 다시 확인한 뒤 삭제하세요.";
+      error.hidden = false;
+      stale = true;
+      return;
+    }
+    error.textContent = failure.message;
+    error.hidden = false;
+    return;
+  } finally {
+    remove.busy = false;
+    $("#delete-confirm").disabled = stale;
+  }
+
+  const deleted = remove.key;
+  closeDelete();
+  closeDetail();
+  announce(`${deleted}${josaEul(deleted)} 삭제했습니다. 커밋 전이면 되돌릴 수 있습니다.`);
+  await refreshIssues();
+  await refreshGit();
+}
+
 
 /** A GET that hands back the ETag as well as the body. */
 async function apiWithEtag(path) {

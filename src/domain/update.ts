@@ -919,9 +919,7 @@ export async function deleteIssue(
   // them, which is recoverable; doing it the other way round would orphan them
   // with nothing left pointing at what they belonged to.
   for (const child of children) {
-    if (strategy === "promote") {
-      await updateIssue(writable, child.key, currentEtagOf(board, child.key), { parent: null }, actor);
-    } else if (strategy === "cascade_cancel" && child.status !== "CANCELLED") {
+    if (strategy === "cascade_cancel" && child.status !== "CANCELLED") {
       // Admin, because §5.2 lets only an admin revive from CANCELLED and the
       // cascade must be able to make the move regardless of who asked.
       await transitionIssue(
@@ -933,6 +931,13 @@ export async function deleteIssue(
         "admin",
       );
     }
+    // Both strategies clear the parent, because in a moment there will not be
+    // one. Cascade used to cancel and stop there, leaving every child pointing
+    // at a uid no longer on the board — which R11 quarantines as `dangling_ref`
+    // the instant the parent file goes. The documented way to delete a parent
+    // produced an INVALID issue every time, and the test for it only asked
+    // whether the child was CANCELLED, which it was.
+    await updateIssue(writable, child.key, currentEtagOf(board, child.key), { parent: null }, actor);
   }
 
   await writable.writer.write({

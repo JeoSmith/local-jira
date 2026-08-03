@@ -95,7 +95,8 @@
       </section>
 
       <div id="edit-backdrop" class="palette-backdrop" hidden>
-        <form id="edit-form" class="palette create-form" aria-label="이슈 수정">
+        <form id="edit-form" class="palette create-form" role="dialog" aria-modal="true"
+              aria-label="이슈 수정">
           <h2 class="detail-section"><span id="edit-key"></span> 수정</h2>
           <div class="create-row">
             <label for="edit-points">포인트</label>
@@ -129,8 +130,46 @@
         </form>
       </div>
 
+      <!-- r01e. A dialog rather than `confirm()`, which the token and comment
+           paths still use: a native confirm cannot show which children are
+           involved, cannot offer the strategy choice §5.1 requires, and cannot
+           follow the theme. -->
+      <div id="delete-backdrop" class="palette-backdrop" hidden>
+        <div id="delete-dialog" class="palette create-form" role="dialog" aria-modal="true"
+             aria-labelledby="delete-heading">
+          <h2 id="delete-heading" class="detail-section">이슈 삭제</h2>
+          <!-- What is being deleted, named. "정말 삭제하시겠습니까?" alone leaves
+               the screen silent about the thing it is asking about. -->
+          <p class="delete-target">
+            <span id="delete-key" class="issue-key"></span>
+            <span id="delete-title"></span>
+          </p>
+
+          <section id="delete-children" class="delete-children" hidden aria-label="하위 이슈 처리">
+            <p id="delete-children-lead" class="delete-children-lead"></p>
+            <p id="delete-children-reason" class="delete-children-reason" hidden></p>
+            <ul id="delete-children-list" class="delete-children-list"></ul>
+            <fieldset id="delete-strategy" class="delete-strategy" hidden>
+              <legend>하위 이슈를 어떻게 할까요?</legend>
+            </fieldset>
+          </section>
+
+          <p id="delete-claim" class="delete-warning" role="alert" hidden></p>
+          <p class="delete-note">
+            커밋 전이라면 <code>git -C .localjira checkout .</code>으로 되돌릴 수 있습니다.
+          </p>
+          <p id="delete-error" class="form-error" role="alert" hidden></p>
+
+          <div class="create-actions">
+            <button type="button" id="delete-cancel" class="ghost-button">취소</button>
+            <button type="button" id="delete-confirm" class="danger-button">삭제</button>
+          </div>
+        </div>
+      </div>
+
       <div id="create-backdrop" class="palette-backdrop" hidden>
-        <form id="create-form" class="palette create-form" aria-label="새 이슈">
+        <form id="create-form" class="palette create-form" role="dialog" aria-modal="true"
+              aria-label="새 이슈">
           <h2 class="detail-section">새 이슈</h2>
           <div class="create-row">
             <label for="create-project">프로젝트</label>
@@ -228,6 +267,7 @@
           </div>
           <div class="detail-actions">
             <button id="detail-edit" type="button" class="ghost-button" hidden>수정</button>
+            <button id="detail-delete" type="button" class="ghost-button danger-ghost" hidden>삭제</button>
             <button id="detail-close" type="button" class="detail-close" aria-label="닫기">×</button>
           </div>
         </header>

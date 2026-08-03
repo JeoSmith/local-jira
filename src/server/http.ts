@@ -577,6 +577,20 @@ async function handle(
       commentOpRoute(decodeURIComponent(commentOp[1]), request, response, authed),
     );
   }
+  if (request.method === "GET" && url.pathname.endsWith("/claim")) {
+    // Who holds this issue, readable on its own.
+    //
+    // It was only ever on the board payload, which covers the active sprint and
+    // nothing else — so a screen looking at a backlog issue had no way to know
+    // somebody was working on it. Deliberately *not* folded into the issue
+    // representation: that body's bytes are the ETag (D15), and a claim taken by
+    // an agent would then invalidate every editor's `If-Match` for a change to
+    // the issue nobody made.
+    const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/claim".length));
+    return guard(response, authed, "issue:read", "issue:read", () =>
+      showClaimRoute(key, response, authed),
+    );
+  }
   if (request.method === "DELETE" && url.pathname.endsWith("/claim")) {
     const key = decodeURIComponent(url.pathname.slice("/issues/".length, -"/claim".length));
     return guard(response, authed, "claim:release", null, () =>
@@ -2472,6 +2486,20 @@ function handleWriteError(error: unknown, response: http.ServerResponse): void {
  * reparented onto it — an If-Match conflict caused by an edit the caller never
  * made and cannot see.
  */
+function showClaimRoute(
+  key: string,
+  response: http.ServerResponse,
+  context: RequestContext,
+): void {
+  const found = findIssue(context.board, key);
+  if (found === null || !("issue" in found)) {
+    return respondError(response, 404, "E_ISSUE_NOT_FOUND", `No issue with key ${key}`);
+  }
+  // `null` when nobody holds it, and an expired lease reads as nobody — STALE is
+  // computed from the heartbeat, never stored (ADR-004 §3).
+  respondJson(response, 200, { claim: claimView(context.runtime.find(found.issue.uid)) });
+}
+
 function childrenRoute(
   key: string,
   response: http.ServerResponse,
