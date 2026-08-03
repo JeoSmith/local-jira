@@ -174,3 +174,73 @@ test("the fixed parameters are the ones the decision names", () => {
   assert.equal(MAX_RANK_LENGTH, 32);
   assert.equal(ALPHABET, ALPHABET.toLowerCase(), "mixed case would sort by locale");
 });
+
+/**
+ * LJ-48. Appending is the ordinary case and must not consume the format.
+ *
+ * `between(before, null)` used to read "no upper bound" as all-`z` and bisect,
+ * so each append landed halfway to the top and the rank grew two digits every
+ * time: six at the first issue, thirty-two at the fourteenth. Past that the
+ * caller reused the previous rank, so every issue from the fifteenth shared one
+ * and `duplicateRankRegions` reported the region permanently. This board hit it
+ * with 47 issues.
+ */
+test("a thousand appends stay distinct and stay short", () => {
+  let rank = between(null, null);
+  const seen = new Set([rank]);
+  let longest = rank.length;
+
+  for (let index = 1; index < 1_000; index += 1) {
+    const next = between(rank, null);
+    assert.ok(next > rank, `append ${index} must sort after its predecessor`);
+    seen.add(next);
+    longest = Math.max(longest, next.length);
+    rank = next;
+  }
+
+  assert.equal(seen.size, 1_000, "every append is a distinct rank");
+  // The old behaviour reached the limit at fourteen. Asserting the *initial*
+  // width rather than merely "under the limit" is what makes this a test of
+  // constant length rather than of slower growth.
+  assert.equal(longest, INITIAL_RANK.length, "appending must not lengthen the rank");
+});
+
+test("appending does not crowd out inserting between", () => {
+  const first = between(null, null);
+  const second = between(first, null);
+
+  // The step leaves room, so slotting something between two appended issues
+  // does not have to lengthen anything.
+  const middle = between(first, second);
+  assert.ok(first < middle && middle < second);
+  assert.equal(middle.length, INITIAL_RANK.length);
+});
+
+test("an appended rank keeps its trailing zeros", () => {
+  // Trimming them would fold `i00000` to `i`, and the next append would read
+  // that back, pad it to six and produce `i00000` a second time.
+  let rank = between(null, null);
+  const produced: string[] = [];
+  for (let index = 0; index < 40; index += 1) {
+    rank = between(rank, null);
+    produced.push(rank);
+  }
+  assert.equal(new Set(produced).size, produced.length);
+  assert.ok(
+    produced.every((value) => value.length === INITIAL_RANK.length),
+    "every appended rank is rendered at full width",
+  );
+});
+
+test("the space between two ranks still runs out, and says so", () => {
+  // The append path must not have made exhaustion unreachable: the rebalance in
+  // ADR-005 §3 is driven by this error, and a signal nothing raises is a
+  // rebalance nothing triggers.
+  let low = between(null, null);
+  let high = between(low, null);
+  assert.throws(() => {
+    for (let index = 0; index < 200; index += 1) {
+      high = between(low, high);
+    }
+  }, RankSpaceExhausted);
+});
