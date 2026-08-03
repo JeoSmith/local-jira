@@ -148,17 +148,6 @@ const HINTS: Record<"unknown" | "revoked" | "expired", string> = {
   expired: "Issue a new one with: localjira token create --user <ID> --password <PW>",
 };
 
-/**
- * A token, shown without showing it.
- *
- * N6 keeps the secret out of files and logs, and an error message is a log. The
- * prefix is enough to tell "you pasted something that is not a token" from "you
- * pasted the wrong token".
- */
-export function maskToken(token: string): string {
-  return `${token.slice(0, 8)}…`;
-}
-
 export function isKnownScope(value: string): value is TokenScope {
   return (TOKEN_SCOPES as readonly string[]).includes(value);
 }

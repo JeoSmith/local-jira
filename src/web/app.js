@@ -39,6 +39,8 @@ $("#create-cancel").addEventListener("click", closeCreate);
 $("#create-form").addEventListener("submit", submitCreate);
 $("#detail-edit").addEventListener("click", () => void openEdit());
 $("#detail-delete").addEventListener("click", () => void openDelete());
+$("#assign-parent").addEventListener("change", () => void saveAssign("parent"));
+$("#assign-sprint").addEventListener("change", () => void saveAssign("sprint"));
 $("#delete-cancel").addEventListener("click", closeDelete);
 $("#delete-confirm").addEventListener("click", () => void submitDelete());
 $("#comment-form").addEventListener("submit", submitComment);
@@ -673,6 +675,7 @@ async function openDetail(issue) {
   $("#detail").hidden = false;
   $("#detail-edit").hidden = !canCreate();
   refreshDeleteAffordance();
+  await loadAssign();
   await loadComments();
   await loadCommits();
   await loadRuns();
@@ -2137,6 +2140,186 @@ async function reloadEdit() {
     list.append(element("dd", "conflict-mine", value === "" ? "(빈 값)" : value));
   }
 }
+
+// ── 부모·스프린트 지정 (r02c) ────────────────────────────────────────────────
+
+const assign = { key: null, etag: null, parent: null, sprint: null, busy: false };
+
+/**
+ * Fills the two pickers from what the server says this issue may be given.
+ *
+ * The candidates are fetched rather than filtered here. The rules are the
+ * server's — which types may parent which (§5.1), what would make a cycle, and
+ * that a closed sprint takes nothing — and a copy in this file is a copy that
+ * drifts. The first sign would be a dropdown offering something the save then
+ * refuses, which is exactly the round trip r01c set out to avoid.
+ */
+async function loadAssign() {
+  const detail = state.detail;
+  if (!detail) return;
+
+  $("#assign-error").hidden = true;
+  assign.key = detail.key;
+
+  let issue;
+  try {
+    issue = await apiWithEtag(`/issues/${encodeURIComponent(detail.key)}`);
+  } catch {
+    // A quarantined issue answers 409 here. The panel simply shows nothing
+    // rather than pretending the fields are editable.
+    return void hideAssign();
+  }
+  assign.etag = issue.etag;
+  assign.parent = issue.body.parent ?? null;
+  assign.sprint = issue.body.sprint ?? null;
+
+  let options = { parents: [], parent_allowed: false, sprints: [] };
+  try {
+    options = await api(`/issues/${encodeURIComponent(detail.key)}/assignable`);
+  } catch {
+    // Leaves both pickers read-only rather than empty-and-editable.
+  }
+
+  paintParent(options);
+  paintSprint(options);
+}
+
+function hideAssign() {
+  for (const id of ["#assign-parent", "#assign-sprint"]) {
+    $(id).hidden = true;
+  }
+  for (const id of ["#assign-parent-note", "#assign-sprint-note"]) {
+    $(id).hidden = true;
+  }
+}
+
+function paintParent(options) {
+  const current = $("#assign-parent-current");
+  const known = options.parents.find((entry) => entry.uid === assign.parent);
+  // Key and title, never the uid: the file stores a ULID and nobody reads one.
+  current.textContent = assign.parent === null
+    ? "최상위"
+    : known
+      ? `${known.key} ${known.title ?? ""}`.trim()
+      : "(이 보드에 없는 부모)";
+
+  const select = $("#assign-parent");
+  const note = $("#assign-parent-note");
+
+  if (!canCreate()) {
+    select.hidden = true;
+    note.hidden = true;
+    return;
+  }
+  if (!options.parent_allowed) {
+    // An epic is always top level. Saying so beats an empty dropdown, which
+    // reads as "none exist yet" — a different fact entirely.
+    select.hidden = true;
+    note.textContent = "이 타입은 항상 최상위입니다.";
+    note.hidden = false;
+    return;
+  }
+
+  note.hidden = true;
+  select.hidden = false;
+  select.replaceChildren(option("", "최상위 (부모 없음)"));
+  for (const entry of options.parents) {
+    select.append(option(entry.uid, `${entry.key} ${entry.title ?? ""}`.trim()));
+  }
+  select.value = assign.parent ?? "";
+  if (options.parents.length === 0) {
+    select.append(option("", "고를 수 있는 부모가 없습니다", true));
+  }
+}
+
+function paintSprint(options) {
+  const current = $("#assign-sprint-current");
+  const known = options.sprints.find((entry) => entry.id === assign.sprint);
+  current.textContent = assign.sprint === null
+    ? "백로그"
+    : known
+      ? `${known.name} (${known.status})`
+      : `${assign.sprint} (닫힘)`;
+
+  const select = $("#assign-sprint");
+  const note = $("#assign-sprint-note");
+
+  if (!canCreate()) {
+    select.hidden = true;
+    note.hidden = true;
+    return;
+  }
+  if (options.sprints.length === 0) {
+    select.hidden = true;
+    note.textContent = "담을 수 있는 스프린트가 없습니다.";
+    note.hidden = false;
+    return;
+  }
+
+  note.hidden = true;
+  select.hidden = false;
+  select.replaceChildren(option("", "백로그 (스프린트 없음)"));
+  for (const entry of options.sprints) {
+    select.append(option(entry.id, `${entry.name} (${entry.status})`));
+  }
+  select.value = assign.sprint ?? "";
+}
+
+function option(value, label, disabled = false) {
+  const node = element("option", "", label);
+  node.value = value;
+  node.disabled = disabled;
+  return node;
+}
+
+/**
+ * Saves one field.
+ *
+ * One field per request, carrying only what changed: a PATCH that also resends
+ * the field nobody touched would turn a parent change into a sprint conflict
+ * for whoever moved it in the meantime.
+ */
+async function saveAssign(field) {
+  if (assign.busy || assign.key === null) return;
+
+  const select = $(field === "parent" ? "#assign-parent" : "#assign-sprint");
+  const chosen = select.value === "" ? null : select.value;
+  if (chosen === assign[field]) {
+    // Nothing changed, so nothing is written — the badge must not move for a
+    // dropdown somebody opened and closed (AC24).
+    return;
+  }
+
+  const error = $("#assign-error");
+  assign.busy = true;
+  select.disabled = true;
+  try {
+    await api(`/issues/${encodeURIComponent(assign.key)}`, {
+      method: "PATCH",
+      ifMatch: assign.etag,
+      body: { [field]: chosen },
+    });
+  } catch (failure) {
+    // The server's message, including the 412 that says somebody else moved
+    // this issue while the panel was open.
+    error.textContent = failure.status === 412
+      ? "이 이슈가 방금 다른 곳에서 바뀌었습니다. 상세를 다시 열어 주세요."
+      : failure.message;
+    error.hidden = false;
+    select.value = assign[field] ?? "";
+    return;
+  } finally {
+    assign.busy = false;
+    select.disabled = false;
+  }
+
+  error.hidden = true;
+  announce(`${assign.key} ${field === "parent" ? "부모를" : "스프린트를"} 바꿨습니다.`);
+  await refreshIssues();
+  await loadAssign();
+  await loadActivity(false);
+}
+
 
 // ── 이슈 삭제 (r01e) ─────────────────────────────────────────────────────────
 

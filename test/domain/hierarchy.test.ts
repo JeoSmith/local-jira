@@ -312,3 +312,103 @@ test("the children of an issue are their own resource", async (t) => {
   assert.equal(after.etag, before.etag, "a derived list must not perturb the validator");
   assert.equal(after.childCount, "2");
 });
+
+/**
+ * r02c. The screen asks what may be chosen instead of working it out.
+ *
+ * A dropdown built from a client-side copy of `ALLOWED_PARENTS` is a copy that
+ * drifts the day a type is added, and the first sign is an option the UI offered
+ * and the write path refused. So the candidate list is the server's answer, and
+ * these assertions are what stop it quietly disagreeing with `validateParent`.
+ */
+test("the assignable parents are exactly the types the hierarchy allows", async (t) => {
+  const session = await makeSession(t);
+  const epic = await make(session, "epic", "에픽");
+  await make(session, "epic", "다른 에픽");
+  const story = await make(session, "story", "스토리", epic.uid);
+  await make(session, "task", "작업");
+
+  const forStory = await call(session, "GET", `/issues/${story.key}/assignable`);
+  assert.equal(forStory.status, 200);
+  const parents = (forStory.json as unknown as { parents: Array<{ type: string }> }).parents;
+  assert.ok(parents.length > 0);
+  assert.ok(parents.every((entry) => entry.type === "epic"), "a story hangs under an epic only");
+
+  const subtask = await make(session, "subtask", "서브태스크", story.uid);
+  const forSubtask = await call(session, "GET", `/issues/${subtask.key}/assignable`);
+  const types = new Set(
+    (forSubtask.json as unknown as { parents: Array<{ type: string }> }).parents
+      .map((entry) => entry.type),
+  );
+  assert.equal(types.has("epic"), false, "a subtask never hangs directly under an epic");
+  assert.ok(types.has("story") || types.has("task"));
+});
+
+test("an epic is told it cannot have a parent, rather than shown an empty list", async (t) => {
+  const session = await makeSession(t);
+  const epic = await make(session, "epic", "에픽");
+  await make(session, "epic", "다른 에픽");
+
+  const answer = await call(session, "GET", `/issues/${epic.key}/assignable`);
+  const body = answer.json as unknown as { parents: unknown[]; parent_allowed: boolean };
+  assert.deepEqual(body.parents, []);
+  // "None exist yet" and "this type never has one" are different facts, and the
+  // screen says different things about them.
+  assert.equal(body.parent_allowed, false);
+});
+
+test("a candidate is never something that already hangs below the issue", async (t) => {
+  const session = await makeSession(t);
+  const epic = await make(session, "epic", "에픽");
+  // Top level on purpose. Creating it under the epic and then hanging the epic
+  // beneath it would plant an actual cycle, which Stage B quarantines — the
+  // wrong fixture, and one that hides what is being tested.
+  const story = await make(session, "story", "스토리");
+
+  // Only a hand-edited file or a merge produces this shape; the type rules make
+  // it unreachable through the API. It still has to be excluded, because
+  // offering it guarantees an `E_PARENT_CYCLE` the person did nothing to cause.
+  const file = path.join(session.board, "issues", "LJ", `${epic.key}.md`);
+  fs.writeFileSync(
+    file,
+    fs.readFileSync(file, "utf8").replace(/^former_keys: .*$/m, `$&\nparent: ${story.uid}`),
+  );
+  await session.server.close();
+  session.server = await startServer({ cwd: path.dirname(session.board), port: 0, watch: false });
+  t.after(() => session.server.close());
+
+  const answer = await call(session, "GET", `/issues/${story.key}/assignable`);
+  assert.equal(answer.status, 200, JSON.stringify(answer.json));
+  const keys = (answer.json as unknown as { parents: Array<{ key: string }> }).parents
+    .map((entry) => entry.key);
+  assert.equal(keys.includes(epic.key), false, "its own descendant is not a candidate");
+});
+
+test("a closed sprint is not offered, because it would refuse the issue", async (t) => {
+  const session = await makeSession(t);
+  const story = await make(session, "story", "스토리");
+
+  const planned = await call(session, "POST", "/projects/LJ/sprints", { body: { name: "계획" } });
+  const closing = await call(session, "POST", "/projects/LJ/sprints", { body: { name: "닫을 것" } });
+  const closedId = (closing.json as unknown as { id: string }).id;
+  assert.equal((await call(session, "POST", `/sprints/${closedId}/start`)).status, 200);
+  assert.equal(
+    (await call(session, "POST", `/sprints/${closedId}/close`, { body: { carry_over: { to: null } } }))
+      .status,
+    200,
+  );
+
+  const answer = await call(session, "GET", `/issues/${story.key}/assignable`);
+  const ids = (answer.json as unknown as { sprints: Array<{ id: string }> }).sprints
+    .map((entry) => entry.id);
+  assert.ok(ids.includes((planned.json as unknown as { id: string }).id));
+  // `requireOpenSprint` answers E_SPRINT_CLOSED for this one, so a picker that
+  // listed it would be offering a guaranteed refusal.
+  assert.equal(ids.includes(closedId), false);
+});
+
+test("asking about an issue that is not there is 404", async (t) => {
+  const session = await makeSession(t);
+  const missing = await call(session, "GET", "/issues/LJ-9999/assignable");
+  assert.equal(missing.status, 404);
+});
