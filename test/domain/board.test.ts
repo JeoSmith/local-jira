@@ -105,6 +105,34 @@ async function makeIssue(session: Session, title: string, points?: number): Prom
   return created.json.key as unknown as string;
 }
 
+/**
+ * Creates an issue as an agent, which needs a token: the CLI and the API both
+ * take the actor from one now (r13c), and there is no other way to be an agent.
+ */
+async function makeAgentIssue(session: Session, title: string): Promise<string> {
+  cli(session.repo, [
+    "admin", "create", "--id", "bot", "--name", "봇", "--password", PASSWORD, "--role", "agent",
+  ]);
+  const issued = cli(session.repo, [
+    "token", "create", "--user", "bot", "--password", PASSWORD,
+    "--scope", "issue:read", "--scope", "issue:edit",
+  ]);
+  assert.equal(issued.status, 0, issued.stderr);
+  await session.server.reconcile();
+
+  const created = await fetch(`${session.server.url}/issues`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${issued.stdout.trim()}`,
+    },
+    body: JSON.stringify({ project: "LJ", type: "task", title, points: 3 }),
+  });
+  const body = (await created.json()) as { key: string };
+  assert.equal(created.status, 201, JSON.stringify(body));
+  return body.key;
+}
+
 async function put(session: Session, key: string, body: Record<string, unknown>) {
   const current = await call(session, "GET", `/issues/${key}`);
   return call(session, "PUT", `/issues/${key}`, { ifMatch: current.etag ?? "", body });
@@ -280,6 +308,54 @@ test("the card badge follows the last change, not the creation", async (t) => {
   // A person editing it again takes the badge back.
   await put(session, key, { points: 5 });
   assert.equal((await cardOf()).last_actor_kind, "human");
+});
+
+/**
+ * S6-D5. The origin has to survive somebody touching the issue.
+ *
+ * `last_actor_kind` is what the badge shows, and it turns `human` the moment a
+ * person triages — which is the very act D16 leans on, moving an agent's
+ * backlog item to TODO. So the card also has to carry where the issue came
+ * from, or "AI 산출물이 사람 것처럼 보이지 않는다" stops being true exactly when
+ * somebody is looking.
+ *
+ * The screen has no test harness (S2-D1 keeps it vanilla), so this pins the
+ * payload the card is built from. It is the closest thing to the claim that can
+ * be checked automatically; the rendering itself was checked in a browser.
+ */
+test("an agent's issue still says so after a person has touched it", async (t) => {
+  const session = await makeSession(t);
+  const sprint = await makeSprint(session);
+  const key = await makeAgentIssue(session, "에이전트가 적재한 것");
+  await put(session, key, { sprint });
+  await call(session, "POST", `/sprints/${sprint}/start`);
+
+  const cardOf = async () => {
+    const board = await call(session, "GET", "/projects/LJ/board");
+    return (board.json as unknown as {
+      issues: Array<{ key: string; last_actor_kind: string; created_by_kind: string }>;
+    }).issues.find((issue) => issue.key === key)!;
+  };
+
+  const fresh = await cardOf();
+  assert.equal(fresh.created_by_kind, "agent");
+
+  // The human triage step. Afterwards the actor badge says 사람 — and the card
+  // must still be able to say the issue came from an agent.
+  await put(session, key, { points: 5 });
+  const triaged = await cardOf();
+  assert.equal(triaged.last_actor_kind, "human", "the last change was a person's");
+  assert.equal(triaged.created_by_kind, "agent", "and the origin did not move with it");
+
+  // Both routes, because the card is built from whichever view is open and the
+  // backlog list is where triage actually happens. Checking only the board
+  // payload let a first attempt at this test pass while the list route had been
+  // stripped of the field.
+  const listed = await call(session, "GET", "/issues?limit=50");
+  const row = (listed.json as unknown as {
+    issues: Array<{ key: string; created_by_kind: string }>;
+  }).issues.find((issue) => issue.key === key)!;
+  assert.equal(row.created_by_kind, "agent", "the backlog list carries the origin too");
 });
 
 test("the board is the same whatever code branch is checked out", async (t) => {

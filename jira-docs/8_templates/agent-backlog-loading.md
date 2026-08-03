@@ -98,7 +98,7 @@ Content-Type: application/json
 |---|---|---|
 | `BACKLOG`는 claim 불가 | 에이전트가 자기가 적재한 걸 스스로 착수하는 것 | §6.1, `E_CLAIM_NOT_REFINED` |
 | 미커밋 파일이 곧 초안 | 검토 없이 이력에 남는 것 | D4·R25 |
-| `created_by_kind=agent` 배지 | AI 산출물이 사람 것처럼 보이는 것 | §8 |
+| `created_by_kind=agent` 배지 | AI 산출물이 사람 것처럼 보이는 것 | §8 — 카드·상세의 "AI 유래" 표시(S6-D5). 사람이 손대도 남는다 |
 
 세 번째가 r13c 이전에 **HTTP API를 쓰라고 못박았던 이유**다 — CLI로 적재하면 그 관문 하나가
 조용히 사라졌다. 지금은 두 경로가 같은 기록을 남기므로 어느 쪽을 써도 된다.

@@ -567,3 +567,13 @@ form button:disabled { opacity: .55; cursor: wait; }
 @media (prefers-color-scheme: dark) {
   .assign-select { border-color: #2c342e; }
 }
+
+/* ── AI 유래 표시 (S6-D5) ─────────────────────────────────────────────────── */
+/* Deliberately not a `.kind` chip: those answer "who changed this last", and
+   reusing the shape would make the two read as the same claim. */
+.origin-agent { padding: 1px 6px; border: 1px solid #b9a3dd; border-radius: 99px;
+  color: #5a3d8c; font-size: 10px; font-weight: 650; white-space: nowrap; }
+
+@media (prefers-color-scheme: dark) {
+  .origin-agent { border-color: #5b4a7d; color: #d9c8f0; }
+}

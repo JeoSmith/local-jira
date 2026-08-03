@@ -536,6 +536,10 @@ function renderCard(issue) {
   // Who touched it last, not who made it. Without this an agent's change looks
   // exactly like the human creation it is sitting on top of (§5.1, §8).
   if (issue.last_actor_kind) meta.append(actorBadge(issue.last_actor_kind, "card-actor"));
+  // And who made it, which the badge above stops telling the moment anybody
+  // else touches the issue — including the very act D16 relies on, a person
+  // moving an agent's backlog item to TODO.
+  if (issue.created_by_kind === "agent") meta.append(originMark());
   card.append(meta);
 
   // Blocked cards say so, and say by what — a mark alone sends the reader
@@ -667,10 +671,30 @@ function actorBadge(kind, extra = "") {
   return element("span", `kind kind-${known} ${extra}`.trim(), ACTOR_LABELS[kind] || kind);
 }
 
+/**
+ * Says the issue itself came from an agent.
+ *
+ * Separate from the actor badge on purpose: that one answers "who changed this
+ * last" and flips to 사람 as soon as a person triages, which is exactly when
+ * somebody reviewing an agent-loaded backlog stops being able to tell what came
+ * from where. D16 named this badge as one of the three gates that let AI refine
+ * be dropped, and the badge has to exist for that to be true (S6-D5).
+ *
+ * A word, not only a colour — the same reason `actorBadge` carries one.
+ */
+function originMark() {
+  const mark = element("span", "origin-agent", "AI 유래");
+  mark.title = "에이전트가 만든 이슈입니다. 이후 누가 고쳤는지는 옆의 배지가 말합니다.";
+  return mark;
+}
+
 async function openDetail(issue) {
   state.detail = { key: issue.key, cursor: null };
   $("#detail-key").textContent = issue.key;
   $("#detail-title").textContent = issue.title || "제목 없음";
+  // On the detail too, so opening an issue answers "where did this come from"
+  // without scrolling to the bottom of the activity timeline.
+  $("#detail-origin").hidden = issue.created_by_kind !== "agent";
   $("#timeline").replaceChildren();
   $("#detail").hidden = false;
   $("#detail-edit").hidden = !canCreate();
