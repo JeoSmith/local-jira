@@ -23,7 +23,16 @@ import {
   UserError,
   type Role,
 } from "./domain/users.ts";
-import { PasswordError } from "./auth/password.ts";
+import { PasswordError, verifyPassword } from "./auth/password.ts";
+import {
+  CliAuthError,
+  isKnownScope,
+  presentedToken,
+  resolveCliActor,
+  TOKEN_ENV,
+} from "./auth/cli-actor.ts";
+import { CredentialStore } from "./auth/credentials.ts";
+import { DEFAULT_AGENT_SCOPES, TOKEN_SCOPES } from "./auth/authorize.ts";
 import { startServer } from "./server/http.ts";
 import {
   findIssue,
@@ -49,11 +58,17 @@ const USAGE = `Usage:
   localjira issue show <KEY> [--json]
   localjira issue create --project <KEY> --type <TYPE> --title <TITLE>
                  [--description <TEXT>] [--points <N>] [--assignee <ID>]
-                 [--label <NAME>]... [--acceptance <TEXT>]... [--json]
+                 [--label <NAME>]... [--acceptance <TEXT>]... [--token <PAT>] [--json]
 
   localjira admin create --id <ID> --name <NAME> --password <PW> [--role <ROLE>] [--json]
   localjira user list [--json]
+  localjira token create --user <ID> --password <PW> [--label <NAME>]
+                 [--scope <SCOPE>]... [--expires-in-days <N>] [--json]
   localjira serve [--port <N>] [--host <ADDR>]
+
+Writing to the board needs a token so the file records who wrote it.
+Put it in ${TOKEN_ENV} rather than passing --token: an argument is visible
+to ps and stays in your shell history.
 `;
 
 const [command, ...argv] = process.argv.slice(2);
@@ -80,6 +95,9 @@ try {
       break;
     case "user":
       runUserCommand(argv);
+      break;
+    case "token":
+      runTokenCommand(argv);
       break;
     case "serve":
       await runServeCommand(argv);
@@ -252,7 +270,7 @@ async function runIssueCommand(args: string[]): Promise<void> {
       rest,
       new Set([
         "--project", "--type", "--title", "--description",
-        "--points", "--assignee", "--label", "--acceptance",
+        "--points", "--assignee", "--label", "--acceptance", "--token",
       ]),
       new Set(["--json"]),
     );
@@ -264,6 +282,26 @@ async function runIssueCommand(args: string[]): Promise<void> {
       process.stderr.write(`Missing required arguments: ${missing.join(", ")}\n${USAGE}`);
       process.exitCode = 2;
       return;
+    }
+
+    // Who first, and on a read-only handle, before the single-writer lock is
+    // taken (ADR-002). A command that is going to be refused must not make a
+    // legitimate writer wait for it — and with a server running, taking the lock
+    // first meant a caller with the wrong scope was told the board was busy
+    // instead of being told about the scope.
+    //
+    // The CLI used to record `{ id: "local", kind: "human" }` for every caller,
+    // so an agent using the CLI — the shorter path, the one it reaches for
+    // first — had its work filed as a person's (§8, r13c).
+    const reader = openBoard(process.cwd());
+    let actor;
+    try {
+      actor = resolveCliActor(reader, {
+        token: presentedToken(options.values.get("--token")),
+        scope: "issue:edit",
+      }).actor;
+    } finally {
+      reader.close();
     }
 
     const writable = await openBoardForWriting(process.cwd());
@@ -282,9 +320,7 @@ async function runIssueCommand(args: string[]): Promise<void> {
           labels: options.repeated.get("--label") ?? [],
           acceptance: (options.repeated.get("--acceptance") ?? []).map((text) => ({ text })),
         },
-        // Until r12a lands there is no session; the actor is recorded as the
-        // local human so the file never claims an agent wrote it.
-        { id: "local", kind: "human" },
+        actor,
       );
 
       if (options.flags.has("--json")) {
@@ -381,6 +417,95 @@ function runAdminCommand(args: string[]): void {
       write("  The password hash is in .local/credentials.sqlite and never leaves this machine.");
     }
   } finally {
+    board.close();
+  }
+}
+
+/**
+ * Issues a token from the terminal.
+ *
+ * Without this, requiring a token for `issue create` would be a dead end: the
+ * only way to mint one was `POST /tokens`, which needs a running server and a
+ * browser session — so a person whose whole workflow is the CLI could no longer
+ * create an issue at all. Refusing a write with no way to satisfy the refusal
+ * is not a safety property, it is a broken command.
+ *
+ * The password is the authentication, mirroring `/auth/login` followed by
+ * `POST /tokens`. Local execution is deliberately *not* treated as authority
+ * here: that assumption is exactly what let the CLI invent an actor.
+ */
+function runTokenCommand(args: string[]): void {
+  const [sub, ...rest] = args;
+  if (sub !== "create") {
+    process.stderr.write(USAGE);
+    process.exitCode = 2;
+    return;
+  }
+
+  const options = parseArgs(
+    rest,
+    new Set(["--user", "--password", "--label", "--scope", "--expires-in-days"]),
+    new Set(["--json"]),
+  );
+
+  const missing = ["--user", "--password"].filter((name) => !options.values.has(name));
+  if (missing.length > 0) {
+    process.stderr.write(`Missing required arguments: ${missing.join(", ")}\n${USAGE}`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const userId = options.values.get("--user") ?? "";
+  const board = openBoard(process.cwd());
+  const store = new CredentialStore(board.localDirectory);
+  try {
+    const user = listUsers(board).find((entry) => entry.id === userId);
+    const stored = store.passwordHash(userId);
+    // One message for "no such account" and "wrong password", because telling
+    // them apart turns this into a way to enumerate accounts.
+    if (!user || !stored || !verifyPassword(options.values.get("--password") ?? "", stored)) {
+      throw new CliAuthError("unknown", "That account and password do not match.");
+    }
+
+    const requested = options.repeated.get("--scope") ?? [...DEFAULT_AGENT_SCOPES];
+    const invalid = requested.filter((scope) => !isKnownScope(scope));
+    if (invalid.length > 0) {
+      throw new CliAuthError(
+        "out_of_scope",
+        `Not a scope: ${invalid.join(", ")}.`,
+        `Allowed: ${TOKEN_SCOPES.join(", ")}`,
+      );
+    }
+
+    const days = options.values.get("--expires-in-days");
+    const issued = store.createToken({
+      userId,
+      name: options.values.get("--label") ?? null,
+      scopes: requested,
+      projectScope: null,
+      // `0` means never, matching the API's own null-is-forever rule (S3-D7).
+      expiresAt:
+        days === undefined
+          ? Date.now() + 90 * 24 * 60 * 60 * 1000
+          : Number(days) === 0
+            ? null
+            : Date.now() + Number(days) * 24 * 60 * 60 * 1000,
+    });
+
+    if (options.flags.has("--json")) {
+      write(JSON.stringify({ token: issued.token, record: issued.record }, null, 2));
+      return;
+    }
+    // The one and only time the plaintext is shown, and it goes to stdout so a
+    // shell can capture it without the surrounding advice.
+    write(issued.token);
+    process.stderr.write(
+      `Issued ${issued.record.tokenId} for ${userId} (${requested.join(", ")}).\n` +
+        `This is the only time it is shown. Put it in ${TOKEN_ENV} rather than passing\n` +
+        "--token, which leaves it in your shell history and in `ps`.\n",
+    );
+  } finally {
+    store.close();
     board.close();
   }
 }
@@ -670,6 +795,11 @@ function describeFailure(error: unknown): {
   }
   if (error instanceof PasswordError) {
     return { code: error.code, message: error.message, recovery: null };
+  }
+  if (error instanceof CliAuthError) {
+    // The message and hint are written not to carry the token: N6 keeps the
+    // secret out of files and logs, and an error stream is a log.
+    return { code: error.code, message: error.message, recovery: error.hint };
   }
   return {
     code: "E_UNEXPECTED",

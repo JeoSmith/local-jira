@@ -1,9 +1,9 @@
 ---
 title: "CLI 토큰 인증 — 에이전트가 CLI를 써도 주체가 agent로 남는다"
-status: draft
+status: done
 owner: 이성훈
 created: 2026-07-31
-updated: 2026-07-31
+updated: 2026-08-03
 related_prd: ../prd/backlog-sprint.md
 requirement: R13
 milestone: M5
@@ -38,24 +38,39 @@ priority: P1
 
 ### 인증
 
-- [ ] Given `LOCALJIRA_TOKEN` 환경변수에 유효한 PAT, When `localjira issue create`를 실행하면, Then 그 토큰의 주체로 이슈가 만들어지고 파일에 **`created_by_kind: agent`** 가 기록된다.
-- [ ] Given `--token <PAT>` 인자, When 실행하면, Then 같은 결과가 되며 **환경변수보다 인자가 우선**한다.
-- [ ] Given 토큰이 전혀 없음, When 쓰기 명령을 실행하면, Then **거부한다.** 익명 쓰기를 조용히 `human`으로 기록하던 현재 동작을 없앤다 — 주체를 모르는 쓰기는 주체를 지어내는 것보다 실패하는 편이 낫다.
-- [ ] Given 토큰이 없음, When **읽기** 명령(`issue list`·`issue show`·`index status`·`doctor`)을 실행하면, Then 그대로 동작한다. 로컬 파일을 읽는 데 인증을 요구하면 `doctor`가 자기 진단을 못 한다.
-- [ ] Given 만료·폐기된 토큰, When 실행하면, Then 그 사유를 구분해 표시하고 종료 코드가 0이 아니다. *(r13a 수명 주기)*
-- [ ] Given `issue:edit` scope가 없는 토큰, When `issue create`를 실행하면, Then **403 사유가 그대로 표시**되고 파일이 만들어지지 않는다. *(r13b, §6.4)*
+- [x] Given `LOCALJIRA_TOKEN` 환경변수에 유효한 PAT, When `localjira issue create`를 실행하면, Then 그 토큰의 주체로 이슈가 만들어지고 파일에 **`created_by_kind: agent`** 가 기록된다.
+- [x] Given `--token <PAT>` 인자, When 실행하면, Then 같은 결과가 되며 **환경변수보다 인자가 우선**한다.
+- [x] Given 토큰이 전혀 없음, When 쓰기 명령을 실행하면, Then **거부한다.** 익명 쓰기를 조용히 `human`으로 기록하던 현재 동작을 없앤다 — 주체를 모르는 쓰기는 주체를 지어내는 것보다 실패하는 편이 낫다.
+- [x] Given 토큰이 없음, When **읽기** 명령(`issue list`·`issue show`·`index status`·`doctor`)을 실행하면, Then 그대로 동작한다. 로컬 파일을 읽는 데 인증을 요구하면 `doctor`가 자기 진단을 못 한다.
+- [x] Given 만료·폐기된 토큰, When 실행하면, Then 그 사유를 구분해 표시하고 종료 코드가 0이 아니다. *(r13a 수명 주기)*
+- [x] Given `issue:edit` scope가 없는 토큰, When `issue create`를 실행하면, Then **403 사유가 그대로 표시**되고 파일이 만들어지지 않는다. *(r13b, §6.4)*
 
 ### 기록의 일관성
 
-- [ ] Given 같은 토큰, When **CLI로 만든 이슈와 HTTP API로 만든 이슈**를 비교하면, Then `created_by_kind`·`last_actor_kind`·`actor_id`가 **동일**하다. 경로가 기록을 바꾸지 않는다.
-- [ ] Given CLI로 만든 이슈, When 활동 타임라인을 보면, Then `initiated_by`를 포함해 HTTP 경로와 같은 이벤트가 남는다. *(§9 N7, R14)*
-- [ ] Given 토큰 사용, When 설정 화면의 PAT 목록을 보면, Then `last_used_at`이 갱신된다 — CLI 사용도 토큰 사용이다. *(r13a)*
+- [x] Given 같은 토큰, When **CLI로 만든 이슈와 HTTP API로 만든 이슈**를 비교하면, Then `created_by_kind`·`last_actor_kind`·`actor_id`가 **동일**하다. 경로가 기록을 바꾸지 않는다.
+- [x] Given CLI로 만든 이슈, When 활동 타임라인을 보면, Then `initiated_by`를 포함해 HTTP 경로와 같은 이벤트가 남는다. *(§9 N7, R14)*
+- [x] Given 토큰 사용, When 설정 화면의 PAT 목록을 보면, Then `last_used_at`이 갱신된다 — CLI 사용도 토큰 사용이다. *(r13a)*
 
 ### 토큰이 새지 않는다
 
-- [ ] Given `--token`으로 실행, When `ps`·셸 히스토리에 노출되는 문제를 확인하면, Then **`LOCALJIRA_TOKEN` 환경변수 사용을 권장 경로로 안내**하고, `--help`가 그렇게 적는다.
-- [ ] Given 어떤 실행이든, When 표준출력·표준오류·이벤트 파일·이슈 파일을 확인하면, Then **토큰 원문이 어디에도 남지 않는다.** 오류 메시지도 `ljp_…` 접두만 보인다. *(N6)*
-- [ ] Given `--json` 출력, When 내용을 확인하면, Then 토큰 필드가 포함되지 않는다.
+- [x] Given `--token`으로 실행, When `ps`·셸 히스토리에 노출되는 문제를 확인하면, Then **`LOCALJIRA_TOKEN` 환경변수 사용을 권장 경로로 안내**하고, `--help`가 그렇게 적는다.
+- [x] Given 어떤 실행이든, When 표준출력·표준오류·이벤트 파일·이슈 파일을 확인하면, Then **토큰 원문이 어디에도 남지 않는다.** 오류 메시지도 `ljp_…` 접두만 보인다. *(N6)*
+- [x] Given `--json` 출력, When 내용을 확인하면, Then 토큰 필드가 포함되지 않는다.
+
+> **만들다 나온 것(2026-08-03).** 이 결정의 값이 바로 청구됐다 — **기존 테스트 12건이 깨졌다.**
+> `localjira issue create`를 토큰 없이 부르던 스위트 다섯이다. 고칠 방법이 둘이었고, 하나는
+> 인수조건을 무르는 것(토큰 없으면 `external` 같은 다른 주체로 기록)이었다. 무르지 않았다 —
+> 깨진 12건은 **바로 그 옛 동작에 기대던 호출자들**이고, 실제 사용자도 똑같이 깨진다는 신호다.
+> 값을 치르는 쪽을 골랐고, `test/fixtures/cli-token.ts`가 그 값을 한 곳에 모았다.
+>
+> **권한 검사를 쓰기 락보다 앞으로 옮겼다.** 처음엔 `openBoardForWriting` 뒤에 뒀는데, 서버가
+> 도는 중에 scope 없는 토큰으로 부르면 **"보드가 사용 중"이라는 답이 돌아왔다** — 정작 문제는
+> 권한인데. 거부될 명령이 단일 쓰기 락(ADR-002)을 두고 정당한 writer와 경합하는 것도 맞지 않다.
+> 읽기 전용 핸들로 먼저 확인하고, 통과한 뒤에 락을 잡는다.
+>
+> **백틱 함정을 다섯 번째로 밟았다.** USAGE 문자열이 템플릿 리터럴인데 안내문에 백틱으로 감싼
+> `ps`를 적었더니 리터럴이 거기서 닫혀 파일 전체가 깨졌다. 앞선 넷은 전부 SQL 주석이었고
+> 이번엔 사용법 텍스트다 — 위치가 아니라 **템플릿 리터럴 안의 백틱**이 문제다.
 
 ## 범위 밖 (Out of Scope)
 
@@ -64,10 +79,17 @@ priority: P1
 - 비밀번호 로그인 CLI — 에이전트의 경로는 PAT다. 사람이 CLI를 쓸 때는 여전히 로컬 실행이 곧 권한이라는 전제를 유지할지 설계에서 정한다
 - CLI에서의 claim·전이·코멘트 — 지금 CLI에 없는 명령이고, 붙일지는 별 스토리다
 
-> ⚠ 미정: 사람이 CLI를 쓸 때. 토큰 없는 쓰기를 전부 막으면 `admin create` 직후의 첫 이슈
-> 생성도 막힌다 — 부트스트랩 경로에 예외를 둘지, admin이 자기 토큰을 먼저 만들게 할지.
-> ⚠ 미정: 토큰을 파일(`~/.localjira/token`)에 두는 경로를 지원할지. 지원하면 편하지만
-> 평문 보관을 권하는 셈이 되고, N6가 키를 git 밖에 두라고만 하지 평문 여부는 말하지 않는다.
+> **S6-D3 — 부트스트랩에 예외를 두지 않고, 대신 `localjira token create`를 낸다.** 예외를
+> 두면 "토큰 없이 써도 되는 상태"가 하나 남고, 그 상태에서 만든 파일은 다시 주체를 지어내야
+> 한다. 그렇다고 그냥 막으면 서버와 브라우저 없이는 토큰을 만들 방법이 없어 **CLI만 쓰는
+> 사람은 이슈를 만들 수 없게 된다** — 빠져나갈 길 없는 거부는 안전장치가 아니라 고장이다.
+> 그래서 비밀번호로 인증하는 토큰 발급 명령을 CLI에 넣었다(`/auth/login` + `POST /tokens`와
+> 같은 것). **로컬 실행을 권한으로 치지 않는다** — 바로 그 가정이 CLI가 주체를 지어내게 만든
+> 원인이다.
+>
+> **S6-D4 — 토큰 파일(`~/.localjira/token`)은 지원하지 않는다.** 편하지만 평문 보관을 권하는
+> 셈이 되고, 파일 권한이 어떻게 되는지는 도구가 보장할 수 없다. 환경변수로 충분하고, 그
+> 이상은 사용자의 비밀 관리 도구가 할 일이다.
 
 ## 선행 의존 (Depends on)
 

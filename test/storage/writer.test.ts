@@ -7,6 +7,8 @@ import process from "node:process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runCli } from "../fixtures/cli-token.ts";
+
 import { BootstrapBusyError } from "../../src/bootstrap/lock.ts";
 import { Outbox } from "../../src/storage/outbox.ts";
 import {
@@ -43,11 +45,8 @@ function git(cwd: string, args: string[]): string {
 }
 
 function cli(cwd: string, args: string[], env: NodeJS.ProcessEnv = {}) {
-  return spawnSync(process.execPath, [CLI, ...args], {
-    cwd,
-    encoding: "utf8",
-    env: { ...process.env, ...env },
-  });
+  // r13c: `issue create` needs a token, which runCli mints for this board.
+  return runCli(cwd, args, env);
 }
 
 function makeSandbox(t: { after: (fn: () => void) => void }): Sandbox {
