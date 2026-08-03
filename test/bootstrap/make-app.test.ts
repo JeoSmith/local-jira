@@ -52,12 +52,23 @@ test("a machine with swiftc gets a native window, and the build says so", (t) =>
 
   const macos = path.join(root, "out", "Local Jira.app", "Contents", "MacOS");
   const compiled = fs.existsSync(path.join(macos, "Local Jira"));
-  const swift = spawnSync("swiftc", ["--version"], { encoding: "utf8" }).status === 0;
+  // macOS *and* the compiler. Swift runs on Linux too — GitHub's Ubuntu runners
+  // have it — but `Cocoa` and `WebKit` do not, so "swiftc exists" is not the
+  // same question as "a native window can be built". This assertion said it was
+  // and turned green on a Mac while failing in CI.
+  const canBuildNative =
+    process.platform === "darwin" &&
+    spawnSync("swiftc", ["--version"], { encoding: "utf8" }).status === 0;
 
-  assert.equal(compiled, swift, "native when swiftc is there, browser launcher when it is not");
+  assert.equal(compiled, canBuildNative, "native on macOS with swiftc, browser launcher elsewhere");
   // Whichever it built, it has to say which — the difference is visible to the
   // person the moment they launch it.
   assert.match(made.stdout, compiled ? /네이티브/ : /브라우저 앱 모드/);
+  if (!compiled) {
+    // And *why* — "swiftc가 없어" on a Mac without the tools is a different
+    // thing to fix than "macOS가 아니라".
+    assert.match(made.stdout, process.platform === "darwin" ? /swiftc/ : /macOS가 아니라/);
+  }
 
   if (compiled) {
     // A shim that hands the binary its board, not the browser launcher.

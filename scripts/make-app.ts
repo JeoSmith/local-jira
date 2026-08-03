@@ -312,6 +312,13 @@ function writeIcon(resources: string): boolean {
  * a shortcut when it cannot, and the build says which one it made.
  */
 function compileWindow(macos: string, options: Options): boolean {
+  // `Cocoa` and `WebKit` are macOS frameworks. Swift itself exists on Linux —
+  // GitHub's Ubuntu runners have it — so checking for the compiler alone says
+  // nothing about whether this can build, and trying it there only produces a
+  // confusing error on the way to the fallback.
+  if (process.platform !== "darwin") {
+    return false;
+  }
   const source = path.join(ROOT, "scripts", "window.swift");
   if (!fs.existsSync(source)) {
     return false;
@@ -389,7 +396,11 @@ function build(options: Options): string {
       `  창     ${
         native
           ? "네이티브 (WKWebView) — 독에 이 앱 이름과 아이콘으로 뜹니다"
-          : "브라우저 앱 모드 — swiftc가 없어 독에는 브라우저로 뜹니다"
+          : `브라우저 앱 모드 — ${
+              process.platform === "darwin"
+                ? "swiftc가 없어"
+                : "macOS가 아니라"
+            } 네이티브 창을 만들지 못했습니다. 독에는 브라우저로 뜹니다`
       }\n` +
       `  아이콘 ${icon ? "생성함" : "건너뜀 (iconutil 없음 — 기본 아이콘으로 뜹니다)"}\n` +
       "\n" +
