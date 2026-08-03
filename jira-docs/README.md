@@ -31,6 +31,7 @@ jira-docs/
 - [M0 부트스트랩 상세 설계](3_designs/detailed/m0-bootstrap.design.md)
 - [구현 스택과 프로젝트 구조](3_designs/detailed/implementation-stack.design.md)
 - [Sprint 01 계획](4_plans/sprints/sprint-01-m1-reliable-core.md)
+- [데스크톱 앱 만들기](7_operations/desktop-app.md) — 아이콘 하나로 보드를 연다(S6-D6)
 - [CLI 토큰 만들기](7_operations/cli-token.md) — 보드에 쓰려면 주체를 밝혀야 한다(S6-D3)
 - [백로그 적재 지침](8_templates/agent-backlog-loading.md) — 에이전트에게 시킬 때 복사해 쓴다
 
