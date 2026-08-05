@@ -3,3 +3,6 @@ users:
   - id: admin
     display_name: 관리자
     role: admin
+  - id: kim
+    display_name: 김성훈
+    role: admin
