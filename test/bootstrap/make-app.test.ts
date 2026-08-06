@@ -222,3 +222,55 @@ test("the iconset is cleaned up, leaving only the icns", (t) => {
     "the intermediate iconset directory does not belong in a shipped bundle",
   );
 });
+
+/**
+ * The window has to have a way out of wherever it lands.
+ *
+ * Pressing 내보내기 used to set `window.location` to `/export.csv`. A browser
+ * treats that as a download and stays put; WebKit rendered the CSV in place, the
+ * board was gone, and with no address bar and no Back the only way out was to
+ * quit the app. The export no longer navigates, but a window with no Back is a
+ * window somebody can be trapped in — so both halves are checked (r29).
+ */
+test("the window can go back, and can always return to the board", () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("../../scripts/window.swift", import.meta.url)),
+    "utf8",
+  );
+  for (const item of ["뒤로", "앞으로", "보드로"]) {
+    assert.ok(source.includes(`"${item}"`), `보기 메뉴에 ${item}가 없다`);
+  }
+  // 보드로 reloads the start URL rather than walking history: Back is no help
+  // when the very first page was the wrong one.
+  assert.match(source, /func goHome\(\)[\s\S]*?load\(URLRequest\(url: boardURL\)\)/);
+});
+
+test("a file response becomes a download instead of replacing the app", () => {
+  const source = fs.readFileSync(
+    fileURLToPath(new URL("../../scripts/window.swift", import.meta.url)),
+    "utf8",
+  );
+  assert.match(source, /decidePolicyFor response: WKNavigationResponse/);
+  assert.match(source, /Content-Disposition/);
+  assert.match(source, /decisionHandler\(\.download\)/);
+  // Both routes to a download: a response that turns out to be a file, and a
+  // link that says `download` — the blob the export uses takes the second.
+  assert.match(source, /navigationResponse: WKNavigationResponse,\s*\n?\s*didBecome download/);
+  assert.match(source, /navigationAction: WKNavigationAction,\s*\n?\s*didBecome download/);
+});
+
+test("the export does not navigate the page", () => {
+  const app = fs.readFileSync(
+    fileURLToPath(new URL("../../src/web/app.js", import.meta.url)),
+    "utf8",
+  );
+  const body = /async function exportCurrent[\s\S]*?\n}/.exec(app);
+  assert.ok(body, "exportCurrent not found");
+  assert.equal(
+    /window\.location/.test(body[0]),
+    false,
+    "setting location is what stranded the desktop window",
+  );
+  assert.match(body[0], /createObjectURL/);
+  assert.match(body[0], /download = filename/);
+});
