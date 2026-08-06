@@ -66,11 +66,12 @@ final class Server {
     }
 }
 
-final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate {
     private var window: NSWindow!
     private var web: WKWebView!
     private let server = Server()
     private var attempts = 0
+    private var saved: URL?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMenu()
@@ -98,6 +99,45 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     // The server takes a moment to come up, so a first load can fail on a
     // perfectly good board. Retry for a while, then say so rather than leaving
     // a blank window with no explanation.
+    /**
+     * A response the board means as a file becomes a download, not a page.
+     *
+     * Without this the window navigated to `/export.csv` and rendered it: the
+     * board vanished and, with no address bar and no Back, quitting was the only
+     * way out. The web app no longer navigates for an export, but anything that
+     * *does* arrive as an attachment has to land in a file rather than replace
+     * the app (r29).
+     */
+    func webView(
+        _ view: WKWebView,
+        decidePolicyFor response: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        let http = response.response as? HTTPURLResponse
+        let disposition = http?.value(forHTTPHeaderField: "Content-Disposition") ?? ""
+        if !response.canShowMIMEType || disposition.lowercased().contains("attachment") {
+            decisionHandler(.download)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    func webView(
+        _ view: WKWebView,
+        navigationResponse: WKNavigationResponse,
+        didBecome download: WKDownload
+    ) {
+        download.delegate = self
+    }
+
+    func webView(
+        _ view: WKWebView,
+        navigationAction: WKNavigationAction,
+        didBecome download: WKDownload
+    ) {
+        download.delegate = self
+    }
+
     func webView(_ view: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         retry()
     }
@@ -140,6 +180,47 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         server.stop()
     }
 
+    /// Where a download lands, and what the person is told about it.
+    ///
+    /// `~/Downloads` under the name the server chose — it already decided what to
+    /// call the file, and a second answer here would only disagree with it.
+    func download(
+        _ download: WKDownload,
+        decideDestinationUsing response: URLResponse,
+        suggestedFilename: String,
+        completionHandler: @escaping (URL?) -> Void
+    ) {
+        let folder = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Downloads")
+        var target = folder.appendingPathComponent(suggestedFilename)
+        // Never overwrite: a second export of the same day is a second file.
+        var attempt = 1
+        while FileManager.default.fileExists(atPath: target.path) {
+            let stem = (suggestedFilename as NSString).deletingPathExtension
+            let extension_ = (suggestedFilename as NSString).pathExtension
+            target = folder.appendingPathComponent("\(stem) (\(attempt)).\(extension_)")
+            attempt += 1
+        }
+        saved = target
+        completionHandler(target)
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        guard let file = saved else { return }
+        // Revealed rather than only announced: a file the person cannot find is
+        // the same as a file that was not saved.
+        NSWorkspace.shared.activateFileViewerSelecting([file])
+        saved = nil
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        let alert = NSAlert()
+        alert.messageText = "내보내지 못했습니다"
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
+        saved = nil
+    }
+
     /// A menu bar, because without one ⌘C, ⌘V and ⌘Q do nothing.
     ///
     /// A web view gets its copy and paste from the Edit menu's responder
@@ -176,6 +257,12 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let viewItem = NSMenuItem()
         let view = NSMenu(title: "보기")
         view.addItem(withTitle: "새로 고침", action: #selector(reload), keyEquivalent: "r")
+        view.addItem(.separator())
+        // The way out. A window with no address bar and no Back is a window you
+        // can be trapped in, and pressing 내보내기 used to do exactly that.
+        view.addItem(withTitle: "뒤로", action: #selector(goBack), keyEquivalent: "[")
+        view.addItem(withTitle: "앞으로", action: #selector(goForward), keyEquivalent: "]")
+        view.addItem(withTitle: "보드로", action: #selector(goHome), keyEquivalent: "0")
         viewItem.submenu = view
         main.addItem(viewItem)
 
@@ -184,6 +271,20 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     @objc private func reload() {
         web.reload()
+    }
+
+    @objc private func goBack() {
+        if web.canGoBack { web.goBack() }
+    }
+
+    @objc private func goForward() {
+        if web.canGoForward { web.goForward() }
+    }
+
+    /// Always available, because Back is no help if the first page was the wrong
+    /// one — this returns to the board whatever happened.
+    @objc private func goHome() {
+        web.load(URLRequest(url: boardURL))
     }
 }
 

@@ -1807,7 +1807,19 @@ function paintPalette() {
  * reconstructed from what the page happens to hold — the file has to match what
  * the person is looking at, not a second reading of it.
  */
-function exportCurrent(format) {
+/**
+ * Saves the export without leaving the page.
+ *
+ * This used to set `window.location`, trusting `Content-Disposition: attachment`
+ * to make the browser download rather than navigate. A browser does. The desktop
+ * window does not — WebKit rendered the CSV in place, the board was gone, and
+ * with no address bar and no Back the only way out was to quit the app (r29).
+ *
+ * Fetching into a blob and clicking an `<a download>` never navigates, so no
+ * client can be stranded by it. The server still writes nothing: an export under
+ * `.localjira/` would pollute the board.
+ */
+async function exportCurrent(format) {
   const chosen = format === "json" ? "json" : "csv";
   const params = new URLSearchParams();
   // Read off the controls rather than a mirror in `state`: the filter the person
@@ -1815,9 +1827,37 @@ function exportCurrent(format) {
   const project = $("#project-filter")?.value;
   if (project) params.set("project", project);
   const query = params.toString();
-  // A plain navigation, so the browser saves the file. The server writes
-  // nothing: putting an export under `.localjira/` would pollute the board.
-  window.location.href = `/export.${chosen}${query ? `?${query}` : ""}`;
+  const route = `/export.${chosen}${query ? `?${query}` : ""}`;
+
+  let blob;
+  let filename = `localjira.${chosen}`;
+  try {
+    const response = await fetch(route, { headers: { accept: "*/*" } });
+    if (!response.ok) {
+      throw new Error(`내보내기 실패 (${response.status})`);
+    }
+    // The server already decided what to call it; re-deriving the name here
+    // would be a second answer to a question it has answered.
+    const disposition = response.headers.get("content-disposition") ?? "";
+    const named = /filename="?([^"]+)"?/.exec(disposition);
+    if (named) {
+      filename = named[1];
+    }
+    blob = await response.blob();
+  } catch (failure) {
+    return void announce(`내보내지 못했습니다: ${failure.message}`, true);
+  }
+
+  const url = URL.createObjectURL(blob);
+  const link = element("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // Freed on the next turn, so the click has taken the URL before it goes.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  announce(`${filename} 저장했습니다.`);
 }
 
 
